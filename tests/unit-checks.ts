@@ -19,6 +19,10 @@ import {
 import { parsePrice, extractProductFromHtml } from '../netlify/functions/utils/product-extract';
 import { parseCsv, importFromCsv } from '../netlify/functions/utils/feed';
 import { comparePrices } from '../netlify/functions/utils/pricing';
+import { encryptJson, decryptJson } from '../netlify/functions/utils/crypto';
+
+// La cifratura delle configurazioni deriva la chiave da APP_SESSION_SECRET.
+process.env.APP_SESSION_SECRET = 'segreto-di-test-non-usare-in-produzione';
 
 let failed = 0;
 const eq = (label: string, actual: unknown, expected: unknown) => {
@@ -102,6 +106,21 @@ const best = comparePrices(90, [{ domain: 'a.it', price: 95 }], 2);
 eq('migliore', best.position, 'migliore');
 const allineato = comparePrices(96, [{ domain: 'a.it', price: 95 }], 2);
 eq('allineato', allineato.position, 'allineato');
+
+// --- cifratura delle configurazioni cliente ---
+const configs = { DATAFORSEO_LOGIN: 'account@moca.it', DATAFORSEO_PASSWORD: 'p4ssw0rd-lungo' };
+const cipher = encryptJson(configs);
+eq('cifrato in 3 parti', cipher.split('.').length, 3);
+eq('nessuna chiave in chiaro', cipher.includes('DATAFORSEO') || cipher.includes('p4ssw0rd'), false);
+eq('roundtrip', decryptJson<typeof configs>(cipher), configs);
+eq('nonce diverso a ogni cifratura', encryptJson(configs) === cipher, false);
+eq('payload manomesso rifiutato', decryptJson(`${cipher.slice(0, -4)}AAAA`), null);
+eq('payload malformato rifiutato', decryptJson('non-un-payload'), null);
+
+process.env.APP_SESSION_SECRET = 'un-altro-segreto-completamente-diverso';
+eq('chiave sbagliata non decifra', decryptJson(cipher), null);
+process.env.APP_SESSION_SECRET = 'segreto-di-test-non-usare-in-produzione';
+eq('chiave corretta decifra ancora', decryptJson<typeof configs>(cipher), configs);
 
 console.log(failed === 0 ? '\nTUTTI I CONTROLLI SUPERATI' : `\n${failed} CONTROLLI FALLITI`);
 process.exit(failed === 0 ? 0 : 1);
