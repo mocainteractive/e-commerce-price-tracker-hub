@@ -19,6 +19,7 @@ import {
 import { parsePrice, extractProductFromHtml } from '../netlify/functions/utils/product-extract';
 import { parseCsv, importFromCsv } from '../netlify/functions/utils/feed';
 import { comparePrices } from '../netlify/functions/utils/pricing';
+import { normalizeSupabaseUrl } from '../netlify/functions/utils/supabase-admin';
 
 let failed = 0;
 const eq = (label: string, actual: unknown, expected: unknown) => {
@@ -102,6 +103,24 @@ const best = comparePrices(90, [{ domain: 'a.it', price: 95 }], 2);
 eq('migliore', best.position, 'migliore');
 const allineato = comparePrices(96, [{ domain: 'a.it', price: 95 }], 2);
 eq('allineato', allineato.position, 'allineato');
+
+// --- SUPABASE_URL: la forma sbagliata faceva fallire ogni endpoint con un
+//     "Errore interno del server" senza spiegazione.
+eq('url completa', normalizeSupabaseUrl('https://abc.supabase.co'), 'https://abc.supabase.co');
+eq('slash finale', normalizeSupabaseUrl('https://abc.supabase.co/'), 'https://abc.supabase.co');
+eq('senza schema', normalizeSupabaseUrl('abc.supabase.co'), 'https://abc.supabase.co');
+eq('con spazi', normalizeSupabaseUrl('  https://abc.supabase.co  '), 'https://abc.supabase.co');
+
+const rifiuta = (value: string): boolean => {
+  try {
+    normalizeSupabaseUrl(value);
+    return false;
+  } catch {
+    return true;
+  }
+};
+eq('rifiuta vuoto', rifiuta(''), true);
+eq('rifiuta hostname senza punto', rifiuta('localhost'), true);
 
 console.log(failed === 0 ? '\nTUTTI I CONTROLLI SUPERATI' : `\n${failed} CONTROLLI FALLITI`);
 process.exit(failed === 0 ? 0 : 1);
