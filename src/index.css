@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Figtree', ui-sans-serif, system-ui, sans-serif;
+  }
+
+  body {
+    @apply bg-moca-bg text-moca-black antialiased;
+  }
+
+  /* Focus visibile e coerente con il brand su tutti gli elementi interattivi. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-moca-red ring-offset-2;
+  }
+}
+
+@layer components {
+  .moca-card {
+    @apply bg-white shadow-sm rounded-xl p-6;
+  }
+
+  .moca-btn-primary {
+    @apply px-4 py-2 bg-moca-red text-white rounded-md font-medium transition-opacity
+           hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed
+           inline-flex items-center gap-2;
+  }
+
+  .moca-btn-secondary {
+    @apply px-4 py-2 border border-gray-300 text-moca-black rounded-md font-medium
+           transition-colors hover:bg-gray-100 disabled:opacity-50
+           disabled:cursor-not-allowed inline-flex items-center gap-2;
+  }
+
+  .moca-input {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-md text-sm
+           focus:border-moca-red focus:ring-0 placeholder:text-moca-gray;
+  }
+
+  .moca-label {
+    @apply block text-sm font-medium text-moca-black mb-1;
+  }
+}
