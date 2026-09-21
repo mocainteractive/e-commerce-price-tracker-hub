@@ -196,6 +196,11 @@ senza schema veniva rifiutata dal client Supabase e ogni endpoint rispondeva
 con un errore generico: ora lo schema viene aggiunto in automatico e un valore
 davvero malformato produce un messaggio che dice cosa correggere.
 
+**Versione di `@supabase/supabase-js`.** E' vincolata a `>=2.94.0 <2.110.0`
+di proposito: dalla 2.110 la libreria richiede Node 22, mentre le Netlify
+Functions girano su Node 20, e il client non si inizializza piu'. Il sintomo e'
+un 500 su ogni endpoint. Prima di alzare la versione, alza il runtime.
+
 **Per verificare la configurazione** apri `/api/health`: elenca quali variabili
 mancano, se le tabelle esistono e se la funzione di aggregazione e'
 disponibile, senza mai mostrare valori di chiavi. Lo stesso esito compare in

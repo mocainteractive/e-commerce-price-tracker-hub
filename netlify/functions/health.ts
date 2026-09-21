@@ -10,7 +10,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { json, withHttp } from './utils/http';
-import { normalizeSupabaseUrl, supabaseAdmin } from './utils/supabase-admin';
+import { getSupabaseInitError, normalizeSupabaseUrl, supabaseAdmin } from './utils/supabase-admin';
 
 interface Check {
   ok: boolean;
@@ -70,8 +70,30 @@ export const handler: Handler = withHttp(['GET'], async (_event, headers) => {
     checks.funzione_pt_price_index = await probeRpc();
   }
 
-  const blocking = ['supabase_url', 'supabase_service_key'];
-  const pronto = blocking.every((key) => checks[key]?.ok);
+  // Il client si inizializza? Se no, il testo originale dell'errore e' l'unica
+  // cosa che permette di capire il perche' senza accedere ai log di Netlify.
+  const initError = getSupabaseInitError();
+  if (initError) {
+    checks.client_supabase = {
+      ok: false,
+      dettaglio: `inizializzazione fallita: ${initError}`,
+    };
+  }
+
+  // `supabase-js` >= 2.110 richiede Node 22: su un runtime piu' vecchio il
+  // client non parte e ogni endpoint risponde 500.
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  const supabaseRequiresNode22 = checks.client_supabase?.ok === false && nodeMajor < 22;
+  checks.runtime_node = {
+    ok: !supabaseRequiresNode22,
+    dettaglio: supabaseRequiresNode22
+      ? `Node ${process.version}: verifica la versione di @supabase/supabase-js, dalla 2.110 richiede Node 22`
+      : `Node ${process.version}`,
+  };
+
+  // Bloccanti: senza queste l'app non legge ne' scrive nulla.
+  const blocking = ['supabase_url', 'supabase_service_key', 'client_supabase'];
+  const pronto = blocking.every((key) => checks[key] === undefined || checks[key].ok);
 
   return json(
     200,

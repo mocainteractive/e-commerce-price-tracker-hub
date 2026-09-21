@@ -14,7 +14,7 @@
     "netlify:dev": "netlify dev"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
+    "@supabase/supabase-js": ">=2.94.0 <2.110.0",
     "fast-xml-parser": "^4.5.0",
     "jose": "^5.9.6",
     "lucide-react": "^0.454.0",
