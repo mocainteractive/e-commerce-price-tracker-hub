@@ -1,9 +1,12 @@
 /**
  * Client per le Netlify Functions dell'app.
  *
- * Ogni chiamata porta il JWT di sessione emesso da `/api/auth-session`.
- * Le API key non passano mai di qui: restano lato server.
+ * Ogni chiamata porta il contesto Moca (cliente, utente, ruolo) e, dove
+ * servono, le credenziali DataForSEO che l'SDK ha ricevuto dall'Hub.
+ * E' il pattern descritto in docs/APP_INTEGRATION_GUIDE.md: le chiavi le
+ * passa il frontend, non vivono nelle variabili d'ambiente dell'app.
  */
+import type { MocaRequestContext } from './MocaProvider';
 
 export class ApiError extends Error {
   constructor(
@@ -16,15 +19,11 @@ export class ApiError extends Error {
   }
 }
 
-function authHeader(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
-
 async function handle<T>(response: Response): Promise<T> {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok || payload.success === false) {
-    // Sessione scaduta: l'unica via d'uscita e' ripassare dall'Hub.
+    // Contesto rifiutato: la sessione non e' piu' valida, si ripassa dall'Hub.
     if (response.status === 401) {
       sessionStorage.removeItem('moca_session');
     }
@@ -38,26 +37,44 @@ async function handle<T>(response: Response): Promise<T> {
   return payload as T;
 }
 
+/**
+ * Le GET portano il contesto nella query string.
+ * Le credenziali non viaggiano mai in query string (finirebbero nei log del
+ * CDN): gli endpoint di sola lettura non ne hanno bisogno.
+ */
 export async function apiGet<T>(
-  token: string,
+  ctx: MocaRequestContext,
   path: string,
   params: Record<string, string | number | undefined> = {},
 ): Promise<T> {
-  const query = new URLSearchParams();
+  const query = new URLSearchParams({
+    client_id: ctx.client_id,
+    client_name: ctx.client_name,
+    user_id: ctx.user_id,
+    user_name: ctx.user_name,
+    role: ctx.role,
+  });
+
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== '') query.set(key, String(value));
   }
 
-  const suffix = query.toString() ? `?${query}` : '';
-  const response = await fetch(`/api/${path}${suffix}`, { headers: authHeader(token) });
+  const response = await fetch(`/api/${path}?${query}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
   return handle<T>(response);
 }
 
-export async function apiPost<T>(token: string, path: string, body: unknown = {}): Promise<T> {
+/** Le POST portano contesto e credenziali nel body. */
+export async function apiPost<T>(
+  ctx: MocaRequestContext,
+  path: string,
+  body: Record<string, unknown> = {},
+): Promise<T> {
   const response = await fetch(`/api/${path}`, {
     method: 'POST',
-    headers: authHeader(token),
-    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...ctx, ...body }),
   });
   return handle<T>(response);
 }

@@ -8,8 +8,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { comparePrices } from './utils/pricing';
 import { normalizeDomain } from './utils/matching';
@@ -22,12 +21,12 @@ interface PostBody {
   addMatch?: { domain: string; url?: string; sellerName?: string };
 }
 
-export const handler: Handler = authed(['GET', 'POST'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET', 'POST'], async (event, moca, headers) => {
   const db = supabaseAdmin();
 
   if (event.httpMethod === 'POST') {
-    requireWriteAccess(session);
-    await applyAction(session.clientId, parseBody<PostBody>(event));
+    requireWriteAccess(moca);
+    await applyAction(moca.clientId, parseBody<PostBody>(event));
   }
 
   const productId =
@@ -38,13 +37,13 @@ export const handler: Handler = authed(['GET', 'POST'], async (event, session, h
   if (!productId) throw new HttpError(400, 'Identificativo prodotto mancante');
 
   const days = Math.min(Math.max(Number(event.queryStringParameters?.days ?? 90), 7), 365);
-  const settings = await loadScanSettings(db, session.clientId);
+  const settings = await loadScanSettings(db, moca.clientId);
 
   const { data: product } = await db
     .from('pt_products')
     .select('*')
     .eq('id', productId)
-    .eq('client_id', session.clientId) // scoping esplicito: service_role ignora la RLS
+    .eq('client_id', moca.clientId) // scoping esplicito: service_role ignora la RLS
     .maybeSingle();
 
   if (!product) throw new HttpError(404, 'Prodotto non trovato');
@@ -64,7 +63,7 @@ export const handler: Handler = authed(['GET', 'POST'], async (event, session, h
       .gte('captured_on', since)
       .order('captured_on', { ascending: true })
       .limit(5000),
-    db.from('pt_competitors').select('domain').eq('client_id', session.clientId).eq('is_own', true),
+    db.from('pt_competitors').select('domain').eq('client_id', moca.clientId).eq('is_own', true),
   ]);
 
   const ownDomains = new Set((ownCompetitors ?? []).map((c) => c.domain as string));

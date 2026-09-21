@@ -19,7 +19,7 @@ interface SettingsResponse {
 }
 
 export function Competitor() {
-  const { token, canWrite } = useMoca();
+  const { requestContext, canWrite } = useMoca();
   const dashboard = useApiGet<DashboardData>('dashboard', { days: 30 });
   const config = useApiGet<SettingsResponse>('settings');
 
@@ -31,7 +31,7 @@ export function Competitor() {
     setBusy(true);
     setError(null);
     try {
-      await apiPost(token, 'settings', body);
+      await apiPost(requestContext, 'settings', body);
       config.reload();
       dashboard.reload();
     } catch (err) {

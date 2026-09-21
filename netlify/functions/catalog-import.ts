@@ -10,8 +10,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { importFromCsv, importFromFeed, importFromSitemap, type CatalogRow } from './utils/feed';
 import { normalizeDomain, normalizeText } from './utils/matching';
@@ -28,8 +27,8 @@ interface RequestBody {
   replace?: boolean;
 }
 
-export const handler: Handler = authed(['POST'], async (event, session, headers) => {
-  requireWriteAccess(session);
+export const handler: Handler = withMoca(['POST'], async (event, moca, headers) => {
+  requireWriteAccess(moca);
 
   const body = parseBody<RequestBody>(event);
   const limit = Math.min(body.limit ?? 500, MAX_PRODUCTS);
@@ -38,7 +37,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
   const { data: settings } = await db
     .from('pt_settings')
     .select('currency, own_domain')
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .maybeSingle();
 
   const defaultCurrency = settings?.currency ?? 'EUR';
@@ -72,7 +71,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
     .from('pt_products')
     .upsert(
       products.map((row) => ({
-        client_id: session.clientId,
+        client_id: moca.clientId,
         sku: row.sku,
         gtin: row.gtin,
         mpn: row.mpn,
@@ -103,7 +102,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
   const ownSnapshots = imported
     .filter((p) => p.own_price !== null)
     .map((p) => ({
-      client_id: session.clientId,
+      client_id: moca.clientId,
       product_id: p.id,
       domain: null,
       is_own: true,
@@ -126,7 +125,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
 
   let deactivated = 0;
   if (body.replace) {
-    deactivated = await deactivateMissing(session.clientId, new Set(products.map((p) => p.sku)));
+    deactivated = await deactivateMissing(moca.clientId, new Set(products.map((p) => p.sku)));
   }
 
   // Registra il dominio del cliente come "nostro" se non lo e' gia'.
@@ -135,7 +134,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
     await db
       .from('pt_competitors')
       .upsert(
-        { client_id: session.clientId, domain: ownDomain, label: 'Il tuo sito', is_own: true },
+        { client_id: moca.clientId, domain: ownDomain, label: 'Il tuo sito', is_own: true },
         { onConflict: 'client_id,domain', ignoreDuplicates: true },
       );
   }

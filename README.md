@@ -31,86 +31,57 @@ Configuration Manager, l'app non gestisce utenti ne' conserva API key.
 ## ARCHITETTURA
 
 ```
-Browser (React 18 + Vite + Tailwind)
-   │  Authorization: Bearer <JWT applicativo>
-   ▼
-Netlify Functions  ──►  DataForSEO (Merchant API, SERP API)
-   │                    credenziali lette da Supabase, mai nel browser
-   ▼
+Moca Hub  ──launch token──►  Browser (React 18 + Vite + Tailwind)
+                                │  moca-sdk.js: sessione + configurations
+                                │  contesto cliente + chiavi nel body
+                                ▼
+                        Netlify Functions  ──►  DataForSEO (Merchant, SERP)
+                                │
+                                ▼
 Supabase (stessa istanza dell'Hub, tabelle con prefisso pt_, RLS per client_id)
 ```
 
-### Autenticazione, e perche' si discosta dallo scaffold
+### Apertura dell'app e credenziali
 
-Il flusso Moca standard valida il launch token **nel browser** e riceve in
-risposta le `configurations` del cliente, cioe' le API key in chiaro.
-
-Qui la validazione avviene **lato server**, in `netlify/functions/auth-session.ts`:
-
-1. il browser passa il `moca_token` a `/api/auth-session`;
-2. la function chiama `POST <hub>/api/validate-launch-token` (stesso contratto
-   documentato: token monouso, TTL 5 minuti);
-3. le credenziali DataForSEO restano server-side, lette da `configurations`;
-4. al browser torna solo un **JWT applicativo** firmato HS256 (8 ore), che
-   autentica in modo verificabile tutte le chiamate successive.
-
-### Dove passano le credenziali DataForSEO
-
-Dalla **configurazione cliente del Moca Hub**, esattamente come per le altre app
-dell'ecosistema. Il percorso completo:
+Flusso ufficiale Moca (`docs/APP_INTEGRATION_GUIDE.md` dell'Hub), identico a
+quello delle altre app satellite:
 
 ```
-Hub, configurazioni del cliente
-  DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD
-        │
-        ▼  consegnate in `configurations` alla validazione del launch token
-auth-session (Netlify Function)
-        │
-        ▼  cifrate AES-256-GCM
-pt_client_credentials
-        │
-        ▼  decifrate al momento della chiamata
-DataForSEO
+Utente clicca "Apri App" sull'Hub
+   -> redirect a  <app>/?moca_token=...
+   -> public/moca-sdk.js valida il token con l'Hub dal browser
+        POST <hub>/api/validate-launch-token   (monouso, TTL 5 minuti)
+   -> l'Hub restituisce client, user, application e `configurations`
+   -> l'SDK salva la sessione in sessionStorage (8 ore)
+   -> il frontend passa contesto e chiavi alle Netlify Functions dell'app
 ```
 
-Le credenziali non arrivano mai al browser: la function riceve le
-`configurations` dall'Hub, le conserva cifrate e le usa al momento della
-chiamata.
+`public/moca-sdk.js` e' la copia dell'SDK ufficiale (`docs/moca-sdk/moca-sdk.js`
+dell'Hub) e va aggiornata quando l'Hub lo aggiorna.
 
-La copia cifrata serve perche' **il postback di DataForSEO e la scansione
-pianificata girano senza un utente collegato**, quindi senza launch token:
-senza quella copia non potrebbero recuperare le credenziali del cliente e i
-risultati andrebbero persi. La chiave di cifratura e' derivata via HKDF da
-`APP_SESSION_SECRET`, che vive solo fra le variabili d'ambiente di Netlify.
+**Le credenziali DataForSEO** arrivano dalla configurazione cliente su Moca Hub
+(`DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`). L'SDK le espone con `getConfig()`
+e il frontend le inoltra nel body alle funzioni, come prescrive la guida:
+*"Le chiavi vengono passate dall'app frontend che le ha ricevute dal Moca Hub"*.
+Non sono mai hardcodate e non stanno nelle variabili d'ambiente del deploy:
+appartengono al cliente, non all'app.
 
-L'ordine di risoluzione e' in `utils/client-config.ts`:
+Restano due percorsi senza browser, dove le chiavi non possono arrivare dal
+frontend: il **postback di DataForSEO** e la **scansione pianificata**. Per
+quelli `utils/client-config.ts` legge la tabella `configurations` dell'Hub con
+la service_role, che e' la stessa fonte da cui l'Hub le consegna.
 
-1. `pt_client_credentials`, la copia dall'ultimo accesso (canale ufficiale);
-2. lettura diretta della tabella `configurations` dell'Hub, quando l'app ne
-   condivide l'istanza Supabase. Copre il cliente con scansione automatica che
-   non ha ancora aperto l'app, e le chiavi aggiunte dopo l'ultimo accesso;
-3. variabili d'ambiente, solo per lo sviluppo locale.
+### Contesto e autorizzazione nelle functions
 
-Se un amministratore aggiunge le chiavi mentre la sessione e' aperta, basta
-riaprire l'app dall'Hub per aggiornarne la copia.
+Ogni chiamata porta `client_id`, `user_id` e `role` (query string sulle GET,
+body sulle POST). `utils/moca-context.ts` li legge, scarta un `client_id` che
+non sia un UUID e verifica su `user_clients` che l'utente sia davvero assegnato
+a quel cliente.
 
-### Perche' la validazione e' lato server
-
-Due motivi, entrambi vincolanti:
-
-- **Le chiavi non entrano nel browser.** La skill `moca-auth-token` chiede che
-  le chiamate sensibili passino da una Netlify Function invece di partire dal
-  frontend: qui le chiavi non raggiungono proprio il client.
-- **Niente IDOR.** Il launch token e' monouso: dopo l'avvio non puo' piu'
-  autenticare nulla. Senza un'identita' verificabile il backend dovrebbe fidarsi
-  del `client_id` inviato dal browser e, poiche' la `service_role` bypassa la
-  RLS, chiunque potrebbe leggere i dati di un altro cliente. La skill
-  `moca-netlify-functions` prevede esplicitamente questa via: *"valida il
-  moca_token lato funzione"*.
-
-Ogni endpoint autenticato passa da `utils/guard.ts`: CORS con allow-list → JWT
-verificato → assegnazione utente/cliente ricontrollata su `user_clients` (per
-intercettare le revoche avvenute durante le 8 ore di sessione).
+Quel controllo non e' decorativo: queste funzioni scrivono con la service_role,
+che scavalca la RLS, quindi e' l'unica cosa che impedisce a un `client_id`
+alterato di leggere i dati di un altro cliente. Se le tabelle dell'Hub non sono
+raggiungibili il controllo viene saltato invece di bloccare l'app.
 
 ### Il flusso di scansione
 
@@ -137,12 +108,10 @@ nulla.
 
 ```
 netlify/functions/
-  auth-session.ts          scambio launch token -> JWT applicativo
   catalog.ts               elenco catalogo con posizionamento
   catalog-import.ts        import da feed / CSV / sitemap
   product-detail.ts        scheda prodotto, storico, azioni sui match
   dashboard.ts             KPI, serie storica, classifica competitor
-  competitor via settings.ts
   settings.ts              impostazioni + gestione domini competitor
   alerts.ts                elenco avvisi e "segna come letto"
   scan-start.ts            avvio scansione
@@ -152,11 +121,9 @@ netlify/functions/
   scheduled-scan.ts        esecuzione giornaliera
   utils/
     http.ts                CORS, risposte JSON, gestione errori
-    session.ts             firma e verifica del JWT applicativo
-    guard.ts               wrapper degli endpoint autenticati
+    moca-context.ts        contesto Moca della richiesta + autorizzazione
     supabase-admin.ts      client service_role
-    client-config.ts       risoluzione API key per cliente, autorizzazione
-    crypto.ts              cifratura a riposo delle configurazioni Hub
+    client-config.ts       risoluzione credenziali DataForSEO
     dataforseo.ts          client Merchant API + SERP API
     matching.ts            motore di matching prodotto
     product-extract.ts     JSON-LD / microdata / Open Graph
@@ -167,8 +134,10 @@ netlify/functions/
     scan-processing.ts     risultati DataForSEO -> match, storico, avvisi
     scan-settings.ts       impostazioni con default
 
+public/moca-sdk.js         SDK ufficiale dell'Hub (copia da docs/moca-sdk/)
+
 src/
-  lib/       moca-sdk, MocaProvider, api, useApi, tipi, formattazione, palette
+  lib/       MocaProvider, moca-types, api, useApi, tipi, formattazione, palette
   components/ AppHeader, ui, PriceLineChart
   pages/     Dashboard, Catalogo, Prodotto, Competitor, Scansioni, Avvisi, Impostazioni
 
@@ -186,14 +155,10 @@ Esegui la migration sull'istanza condivisa con l'Hub:
 
 ```bash
 psql "$DATABASE_URL" -f supabase/migrations/0001_price_tracker.sql
-psql "$DATABASE_URL" -f supabase/migrations/0002_client_credentials.sql
 ```
 
-La prima crea le tabelle con prefisso `pt_`, le policy RLS basate su
-`user_clients` e la funzione di aggregazione `pt_price_index` per la dashboard.
-La seconda crea `pt_client_credentials`, dove finiscono cifrate le
-configurazioni consegnate dall'Hub: ha la RLS attiva e nessuna policy, quindi e'
-raggiungibile solo dalla `service_role` delle Netlify Functions.
+Crea le tabelle con prefisso `pt_`, le policy RLS basate su `user_clients` e la
+funzione di aggregazione `pt_price_index` per la dashboard.
 
 ### 2. Configurazioni del cliente su Moca Hub
 
@@ -205,8 +170,8 @@ Un super_admin aggiunge, fra le `configurations` del cliente:
 | `DATAFORSEO_PASSWORD` | password dell'account DataForSEO |
 
 E' l'unico posto dove vanno inserite: l'app le riceve dall'Hub alla validazione
-del launch token e non le chiede mai altrove. Vedi *Dove passano le credenziali
-DataForSEO*.
+del launch token e non le chiede mai altrove. Vedi *Apertura dell'app e
+credenziali*.
 
 Senza queste chiavi l'app funziona in sola consultazione e la sezione Scansioni
 lo segnala esplicitamente.
@@ -215,13 +180,15 @@ lo segnala esplicitamente.
 
 | Variabile | Dove | Note |
 |---|---|---|
-| `MOCA_HUB_URL` | server | URL dell'Hub |
-| `VITE_MOCA_HUB_URL` | build | idem, per la schermata Accesso Negato |
-| `APP_SESSION_SECRET` | server | `openssl rand -base64 48`. Firma i JWT di sessione e, via HKDF, cifra le configurazioni cliente: cambiarlo invalida le sessioni e rende illeggibile la copia cifrata, che viene rigenerata al primo accesso |
-| `SUPABASE_URL` | server | |
+| `VITE_MOCA_HUB_URL` | build | URL dell'Hub. Gia' impostata in `netlify.toml` |
+| `SUPABASE_URL` | server | istanza condivisa con l'Hub |
 | `SUPABASE_SERVICE_ROLE_KEY` | server | **mai** con prefisso `VITE_` |
-| `DATAFORSEO_POSTBACK_SECRET` | server | `openssl rand -hex 32` |
+| `DATAFORSEO_POSTBACK_SECRET` | server | `openssl rand -hex 32`, protegge il callback |
 | `APP_PUBLIC_URL` | server | URL pubblica, serve a costruire il postback |
+
+Nessuna di queste contiene chiavi di clienti: quelle stanno sull'Hub. Senza le
+due variabili Supabase l'app si apre lo stesso, ma non puo' salvare lo storico
+ne' eseguire le scansioni pianificate.
 
 ### 4. Deploy e registrazione
 
@@ -236,9 +203,10 @@ npm install
 npm run netlify:dev          # funzioni + frontend insieme
 ```
 
-Con `MOCA_ALLOW_MOCK=true` e `VITE_MOCA_ALLOW_MOCK=true` l'app parte senza
-launch token usando una sessione fittizia. Il flag vale solo in locale: in
-produzione `auth-session` rifiuta la richiesta mock.
+Su `localhost` l'SDK entra automaticamente in Mock Mode e l'app parte senza
+launch token. Le chiavi di test si mettono in `.env.local`
+(`VITE_DEV_DATAFORSEO_LOGIN` e `VITE_DEV_DATAFORSEO_PASSWORD`) e non vanno
+committate. Il Mock Mode e' interno all'SDK e non si attiva fuori da localhost.
 
 ---
 
@@ -253,9 +221,7 @@ npm run build       # build di produzione
 I test coprono la logica pura, cioe' le parti dove un errore silenzioso
 costerebbe di piu': validazione GTIN, parsing dei prezzi nelle diverse
 convenzioni locali, scoring dei match, estrazione JSON-LD, CSV con separatori e
-campi quotati, calcolo del posizionamento, e il ciclo di cifratura delle
-configurazioni cliente (roundtrip, nonce diverso a ogni cifratura, rifiuto di
-payload manomessi e di chiavi sbagliate).
+campi quotati, calcolo del posizionamento.
 
 ---
 

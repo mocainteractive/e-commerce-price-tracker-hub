@@ -6,7 +6,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { ok } from './utils/http';
-import { authed } from './utils/guard';
+import { withMoca } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { comparePrices, type PricePosition } from './utils/pricing';
 import { loadLatestPrices } from './utils/price-queries';
@@ -14,7 +14,7 @@ import { loadScanSettings } from './utils/scan-settings';
 
 const MAX_PAGE_SIZE = 100;
 
-export const handler: Handler = authed(['GET'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET'], async (event, moca, headers) => {
   const params = event.queryStringParameters ?? {};
   const page = Math.max(1, Number(params.page ?? 1));
   const pageSize = Math.min(Number(params.pageSize ?? 25), MAX_PAGE_SIZE);
@@ -22,7 +22,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
   const positionFilter = params.position as PricePosition | undefined;
 
   const db = supabaseAdmin();
-  const settings = await loadScanSettings(db, session.clientId);
+  const settings = await loadScanSettings(db, moca.clientId);
 
   let query = db
     .from('pt_products')
@@ -30,7 +30,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
       'id, sku, gtin, brand, title, category, product_url, image_url, own_price, currency, own_availability, own_price_checked_at, google_product_id',
       { count: 'exact' },
     )
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .eq('is_active', true);
 
   if (search) {
@@ -51,7 +51,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
 
   const rows = products ?? [];
   const priceMap = await loadLatestPrices(
-    session.clientId,
+    moca.clientId,
     rows.map((p) => p.id as string),
   );
 

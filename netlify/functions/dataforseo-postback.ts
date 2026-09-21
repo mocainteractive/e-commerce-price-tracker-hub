@@ -15,7 +15,7 @@ import type { Handler, HandlerEvent } from '@netlify/functions';
 import { timingSafeEqual } from 'node:crypto';
 import { fail, json, withHttp } from './utils/http';
 import { supabaseAdmin } from './utils/supabase-admin';
-import { getDataForSeoCredentials } from './utils/client-config';
+import { loadDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
 import { addOffersFound, processTask, refreshRunStatus, type TaskRow } from './utils/scan-processing';
 import { loadScanSettings } from './utils/scan-settings';
@@ -48,7 +48,7 @@ export const handler: Handler = withHttp(['POST'], async (event, headers) => {
   }
 
   const settings = await loadScanSettings(db, task.client_id as string);
-  const credentials = await getDataForSeoCredentials(task.client_id as string);
+  const credentials = await loadDataForSeoCredentials(task.client_id as string);
   const dfs = new DataForSeoClient(credentials.login, credentials.password);
 
   const offers = await processTask(db, dfs, task as unknown as TaskRow, settings);

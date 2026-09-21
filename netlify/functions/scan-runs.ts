@@ -6,10 +6,10 @@
  */
 import type { Handler } from '@netlify/functions';
 import { ok } from './utils/http';
-import { authed } from './utils/guard';
+import { withMoca } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 
-export const handler: Handler = authed(['GET'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET'], async (event, moca, headers) => {
   const limit = Math.min(Math.max(Number(event.queryStringParameters?.limit ?? 20), 1), 50);
   const db = supabaseAdmin();
 
@@ -18,7 +18,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
     .select(
       'id, triggered_by, status, products_total, products_done, offers_found, error_message, started_at, finished_at',
     )
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .order('started_at', { ascending: false })
     .limit(limit);
 
@@ -31,7 +31,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
     const { data: pending } = await db
       .from('pt_scan_tasks')
       .select('run_id')
-      .eq('client_id', session.clientId)
+      .eq('client_id', moca.clientId)
       .eq('status', 'in_attesa')
       .in(
         'run_id',

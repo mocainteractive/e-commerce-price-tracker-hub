@@ -11,7 +11,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { supabaseAdmin } from './utils/supabase-admin';
-import { getDataForSeoCredentials } from './utils/client-config';
+import { loadDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
 import { collectPendingTasks, startScan } from './utils/scan-runner';
 import { loadScanSettings } from './utils/scan-settings';
@@ -36,7 +36,7 @@ export const handler: Handler = async () => {
 
     try {
       const settings = await loadScanSettings(db, clientId);
-      const credentials = await getDataForSeoCredentials(clientId);
+      const credentials = await loadDataForSeoCredentials(clientId);
       const dfs = new DataForSeoClient(credentials.login, credentials.password);
 
       // 1. Chiudi quello che e' rimasto aperto.

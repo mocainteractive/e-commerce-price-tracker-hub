@@ -28,7 +28,7 @@ const LOCATIONS = [
 const CURRENCIES = ['EUR', 'GBP', 'USD', 'CHF'];
 
 export function Impostazioni() {
-  const { token, canWrite, user } = useMoca();
+  const { requestContext, canWrite, user } = useMoca();
   const { data, loading, error, reload } = useApiGet<SettingsResponse>('settings');
 
   const [form, setForm] = useState<Settings | null>(null);
@@ -52,7 +52,7 @@ export function Impostazioni() {
     setBusy(true);
     setSaveError(null);
     try {
-      await apiPost(token, 'settings', {
+      await apiPost(requestContext, 'settings', {
         settings: {
           own_domain: form.own_domain,
           catalog_source: form.catalog_source,

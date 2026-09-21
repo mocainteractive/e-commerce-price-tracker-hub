@@ -1,25 +1,57 @@
 /**
- * MocaProvider - context React per l'integrazione con Moca Hub.
+ * MocaProvider - integrazione con Moca Hub secondo il flusso ufficiale.
  *
- * Esegue moca.init() una sola volta, mostra lo spinner durante la validazione
- * e, se fallisce, la schermata "Accesso Negato" con il link all'Hub.
+ * Carica `public/moca-sdk.js` (copia dell'SDK dell'Hub), chiama `init()` una
+ * sola volta, e mostra "Accesso Negato" se la sessione non e' valida.
+ *
+ * L'SDK valida `?moca_token=` direttamente con l'Hub e conserva in
+ * sessionStorage client, user e `configurations` del cliente. Le chiavi
+ * vengono poi inoltrate alle Netlify Functions dell'app, come previsto da
+ * docs/APP_INTEGRATION_GUIDE.md ("Le chiavi vengono passate dall'app frontend
+ * che le ha ricevute dal Moca Hub").
  */
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ShieldAlert } from 'lucide-react';
-import { MocaSDK, type MocaClient, type MocaUser } from './moca-sdk';
+import {
+  CONFIG_KEYS,
+  type MocaApplication,
+  type MocaClient,
+  type MocaSDKInstance,
+  type MocaUser,
+} from './moca-types';
 
-const HUB_URL = import.meta.env.VITE_MOCA_HUB_URL ?? 'https://moca-central-hub.netlify.app';
-const ALLOW_MOCK = import.meta.env.VITE_MOCA_ALLOW_MOCK === 'true';
+const MOCA_HUB_URL =
+  (import.meta.env.VITE_MOCA_HUB_URL as string | undefined) ?? 'https://moca-central-hub.netlify.app';
+
+declare global {
+  interface Window {
+    MocaSDK?: new (hubUrl: string) => MocaSDKInstance;
+  }
+}
+
+/** Contesto che ogni chiamata alle nostre functions deve portare con se'. */
+export interface MocaRequestContext {
+  client_id: string;
+  client_name: string;
+  user_id: string;
+  user_name: string;
+  role: string;
+  dfs_login?: string;
+  dfs_password?: string;
+}
 
 interface MocaContextValue {
   client: MocaClient;
   user: MocaUser;
+  application: MocaApplication | null;
+  getConfig: (key: string) => string | null;
+  hasConfig: (key: string) => boolean;
   /** true se il cliente ha le credenziali DataForSEO configurate nell'Hub. */
   hasDataForSeo: boolean;
-  /** JWT applicativo per le chiamate a /api/*. */
-  token: string;
   /** false per i ruoli in sola lettura (external). */
   canWrite: boolean;
+  /** Contesto da inoltrare alle Netlify Functions. */
+  requestContext: MocaRequestContext;
   logout: () => void;
 }
 
@@ -31,17 +63,127 @@ export function useMoca(): MocaContextValue {
   return ctx;
 }
 
+function loadSdkScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.MocaSDK) return resolve();
+
+    const existing = document.querySelector<HTMLScriptElement>('script[data-moca-sdk]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('Caricamento moca-sdk.js fallito')));
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = '/moca-sdk.js';
+    script.async = true;
+    script.dataset.mocaSdk = 'true';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Caricamento moca-sdk.js fallito'));
+    document.head.appendChild(script);
+  });
+}
+
 export function MocaProvider({ children }: { children: ReactNode }) {
-  const [sdk] = useState(() => new MocaSDK(HUB_URL));
+  const [sdk, setSdk] = useState<MocaSDKInstance | null>(null);
   const [status, setStatus] = useState<'loading' | 'ok' | 'denied'>('loading');
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Mock Mode: solo in locale e solo se l'ambiente lo consente.
-    // Nessuna chiave reale nel repo: le credenziali restano lato server.
-    if (ALLOW_MOCK) sdk.enableMockMode();
+    let cancelled = false;
 
-    sdk.init().then((authenticated) => setStatus(authenticated ? 'ok' : 'denied'));
-  }, [sdk]);
+    (async () => {
+      try {
+        await loadSdkScript();
+        if (cancelled) return;
+
+        if (!window.MocaSDK) {
+          throw new Error('MocaSDK non disponibile dopo il caricamento dello script');
+        }
+
+        const instance = new window.MocaSDK(MOCA_HUB_URL);
+
+        // Mock Mode solo su localhost: simula la sessione dell'Hub.
+        // Le chiavi di test vanno in .env.local, mai nel repo.
+        const host = window.location.hostname;
+        if (host === 'localhost' || host === '127.0.0.1') {
+          console.info('[MocaProvider] Localhost: Mock Mode attivo');
+          instance.enableMockMode({
+            client: {
+              // Le functions accettano solo UUID: il mock ne usa uno valido,
+              // altrimenti in locale ogni chiamata verrebbe respinta.
+              id: (import.meta.env.VITE_DEV_CLIENT_ID as string) || '00000000-0000-4000-8000-000000000001',
+              name: 'Cliente Demo',
+              logo_url: 'https://placehold.co/100/E52217/FFFFFF?text=DEMO',
+            },
+            user: {
+              id: '00000000-0000-4000-8000-0000000000aa',
+              name: 'Sviluppatore',
+              role: 'super_admin',
+              level: 5,
+            },
+            configurations: {
+              [CONFIG_KEYS.dfsLogin]: (import.meta.env.VITE_DEV_DATAFORSEO_LOGIN as string) ?? '',
+              [CONFIG_KEYS.dfsPassword]: (import.meta.env.VITE_DEV_DATAFORSEO_PASSWORD as string) ?? '',
+            },
+          });
+        }
+
+        const authenticated = await instance.init();
+        if (cancelled) return;
+
+        setSdk(instance);
+        setStatus(authenticated ? 'ok' : 'denied');
+      } catch (err) {
+        if (cancelled) return;
+        console.error('[MocaProvider] Inizializzazione fallita:', err);
+        setError(err instanceof Error ? err.message : 'Errore sconosciuto');
+        setStatus('denied');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const value = useMemo<MocaContextValue | null>(() => {
+    if (!sdk || status !== 'ok') return null;
+
+    const client = sdk.getClient();
+    const user = sdk.getUser();
+    if (!client || !user) return null;
+
+    const dfsLogin = sdk.getConfig(CONFIG_KEYS.dfsLogin) ?? '';
+    const dfsPassword = sdk.getConfig(CONFIG_KEYS.dfsPassword) ?? '';
+
+    return {
+      client,
+      user,
+      application: sdk.getApplication(),
+      getConfig: (key) => sdk.getConfig(key),
+      hasConfig: (key) => {
+        const v = sdk.getConfig(key);
+        return typeof v === 'string' && v.length > 0;
+      },
+      hasDataForSeo: Boolean(dfsLogin && dfsPassword),
+      canWrite: user.role !== 'external',
+      requestContext: {
+        client_id: client.id,
+        client_name: client.name,
+        user_id: user.id,
+        user_name: user.name,
+        role: user.role,
+        // Inoltrate solo se presenti: le functions hanno un fallback
+        // sulle configurazioni cliente dell'Hub.
+        ...(dfsLogin && dfsPassword ? { dfs_login: dfsLogin, dfs_password: dfsPassword } : {}),
+      },
+      logout: () => {
+        sdk.logout();
+        window.location.href = MOCA_HUB_URL;
+      },
+    };
+  }, [sdk, status]);
 
   if (status === 'loading') {
     return (
@@ -52,27 +194,14 @@ export function MocaProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  if (status === 'denied') {
-    return <AccessoNegato hubUrl={HUB_URL} />;
+  if (status === 'denied' || !value) {
+    return <AccessoNegato hubUrl={MOCA_HUB_URL} details={error} />;
   }
-
-  const session = sdk.getSession()!;
-  const value: MocaContextValue = {
-    client: session.client,
-    user: session.user,
-    hasDataForSeo: session.hasDataForSeo,
-    token: session.token,
-    canWrite: session.user.role !== 'external',
-    logout: () => {
-      sdk.logout();
-      window.location.href = HUB_URL;
-    },
-  };
 
   return <MocaContext.Provider value={value}>{children}</MocaContext.Provider>;
 }
 
-function AccessoNegato({ hubUrl }: { hubUrl: string }) {
+function AccessoNegato({ hubUrl, details }: { hubUrl: string; details: string | null }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-moca-bg text-center px-4">
       <div className="bg-white rounded-xl shadow-sm p-10 max-w-md">
@@ -82,9 +211,10 @@ function AccessoNegato({ hubUrl }: { hubUrl: string }) {
         <h1 className="text-2xl font-bold text-moca-black mb-2">Accesso Negato</h1>
         <p className="text-moca-gray mb-6">
           Questa applicazione deve essere aperta tramite <strong>Moca Hub</strong>.
-          Se hai gia' effettuato l'accesso, il link potrebbe essere scaduto: torna
-          all'Hub e riapri l'app.
+          Il link di accesso e' monouso e scade dopo cinque minuti: torna all'Hub
+          e riapri l'app.
         </p>
+        {details && <p className="text-xs text-moca-gray mb-6">Dettaglio tecnico: {details}</p>}
         <a
           href={hubUrl}
           className="inline-block px-6 py-3 bg-moca-red text-white rounded-md font-semibold hover:opacity-90 transition-opacity"

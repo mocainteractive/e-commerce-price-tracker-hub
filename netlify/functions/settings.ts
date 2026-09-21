@@ -8,8 +8,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { normalizeDomain } from './utils/matching';
 
@@ -32,40 +31,40 @@ interface RequestBody {
   removeCompetitorId?: string;
 }
 
-export const handler: Handler = authed(['GET', 'POST'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET', 'POST'], async (event, moca, headers) => {
   const db = supabaseAdmin();
 
   if (event.httpMethod === 'POST') {
-    requireWriteAccess(session);
+    requireWriteAccess(moca);
     const body = parseBody<RequestBody>(event);
 
     if (body.settings) {
-      await updateSettings(session.clientId, body.settings);
+      await updateSettings(moca.clientId, body.settings);
     }
     if (body.addCompetitor) {
-      await addCompetitor(session.clientId, body.addCompetitor);
+      await addCompetitor(moca.clientId, body.addCompetitor);
     }
     if (body.removeCompetitorId) {
       const { error } = await db
         .from('pt_competitors')
         .delete()
         .eq('id', body.removeCompetitorId)
-        .eq('client_id', session.clientId); // scoping esplicito: la RLS qui non opera
+        .eq('client_id', moca.clientId); // scoping esplicito: la RLS qui non opera
       if (error) throw new HttpError(500, 'Rimozione del competitor non riuscita');
     }
   }
 
   const [{ data: settings }, { data: competitors }] = await Promise.all([
-    db.from('pt_settings').select('*').eq('client_id', session.clientId).maybeSingle(),
+    db.from('pt_settings').select('*').eq('client_id', moca.clientId).maybeSingle(),
     db
       .from('pt_competitors')
       .select('id, domain, label, is_own, is_active, created_at')
-      .eq('client_id', session.clientId)
+      .eq('client_id', moca.clientId)
       .order('is_own', { ascending: false })
       .order('domain'),
   ]);
 
-  return ok({ settings: settings ?? defaultSettings(session.clientId), competitors: competitors ?? [] }, headers);
+  return ok({ settings: settings ?? defaultSettings(moca.clientId), competitors: competitors ?? [] }, headers);
 });
 
 async function updateSettings(clientId: string, payload: SettingsPayload): Promise<void> {

@@ -2,8 +2,8 @@
  * Client Supabase con service_role.
  *
  * ATTENZIONE: bypassa la RLS. Esiste solo lato server (Netlify Functions) e
- * ogni endpoint che lo usa DEVE aver gia' verificato la sessione applicativa e
- * autorizzato il `client_id` richiesto (vedi utils/session.ts).
+ * ogni endpoint che lo usa DEVE aver gia' letto e autorizzato il `client_id`
+ * della richiesta (vedi utils/moca-context.ts).
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { requireEnv } from './http';

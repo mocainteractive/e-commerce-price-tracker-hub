@@ -6,7 +6,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { ok } from './utils/http';
-import { authed } from './utils/guard';
+import { withMoca } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { comparePrices, round2, type PricePosition } from './utils/pricing';
 import { loadLatestPrices } from './utils/price-queries';
@@ -21,32 +21,32 @@ interface CompetitorStat {
   avgDeltaPct: number | null;
 }
 
-export const handler: Handler = authed(['GET'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET'], async (event, moca, headers) => {
   const days = Math.min(Math.max(Number(event.queryStringParameters?.days ?? 30), 7), 180);
   const db = supabaseAdmin();
-  const settings = await loadScanSettings(db, session.clientId);
+  const settings = await loadScanSettings(db, moca.clientId);
 
   const [{ data: products }, { data: competitorRows }, { data: alerts }, { data: lastRun }] =
     await Promise.all([
       db
         .from('pt_products')
         .select('id, own_price')
-        .eq('client_id', session.clientId)
+        .eq('client_id', moca.clientId)
         .eq('is_active', true),
       db
         .from('pt_competitors')
         .select('domain, label, is_own')
-        .eq('client_id', session.clientId),
+        .eq('client_id', moca.clientId),
       db
         .from('pt_alerts')
         .select('id, kind, domain, message, delta_pct, created_at, is_read, product_id')
-        .eq('client_id', session.clientId)
+        .eq('client_id', moca.clientId)
         .order('created_at', { ascending: false })
         .limit(10),
       db
         .from('pt_scan_runs')
         .select('id, status, started_at, finished_at, products_total, products_done, offers_found')
-        .eq('client_id', session.clientId)
+        .eq('client_id', moca.clientId)
         .order('started_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
@@ -54,7 +54,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
 
   const productRows = products ?? [];
   const priceMap = await loadLatestPrices(
-    session.clientId,
+    moca.clientId,
     productRows.map((p) => p.id as string),
   );
 
@@ -122,7 +122,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
 
   // --- Andamento storico (aggregato nel database) ---------------------------
   const { data: series, error: seriesError } = await db.rpc('pt_price_index', {
-    p_client_id: session.clientId,
+    p_client_id: moca.clientId,
     p_days: days,
   });
 
@@ -133,7 +133,7 @@ export const handler: Handler = authed(['GET'], async (event, session, headers) 
   const { count: unreadAlerts } = await db
     .from('pt_alerts')
     .select('id', { count: 'exact', head: true })
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .eq('is_read', false);
 
   return ok(
