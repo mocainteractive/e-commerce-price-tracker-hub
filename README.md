@@ -54,6 +54,48 @@ Qui la validazione avviene **lato server**, in `netlify/functions/auth-session.t
 4. al browser torna solo un **JWT applicativo** firmato HS256 (8 ore), che
    autentica in modo verificabile tutte le chiamate successive.
 
+### Dove passano le credenziali DataForSEO
+
+Dalla **configurazione cliente del Moca Hub**, esattamente come per le altre app
+dell'ecosistema. Il percorso completo:
+
+```
+Hub, configurazioni del cliente
+  DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD
+        │
+        ▼  consegnate in `configurations` alla validazione del launch token
+auth-session (Netlify Function)
+        │
+        ▼  cifrate AES-256-GCM
+pt_client_credentials
+        │
+        ▼  decifrate al momento della chiamata
+DataForSEO
+```
+
+Le credenziali non arrivano mai al browser: la function riceve le
+`configurations` dall'Hub, le conserva cifrate e le usa al momento della
+chiamata.
+
+La copia cifrata serve perche' **il postback di DataForSEO e la scansione
+pianificata girano senza un utente collegato**, quindi senza launch token:
+senza quella copia non potrebbero recuperare le credenziali del cliente e i
+risultati andrebbero persi. La chiave di cifratura e' derivata via HKDF da
+`APP_SESSION_SECRET`, che vive solo fra le variabili d'ambiente di Netlify.
+
+L'ordine di risoluzione e' in `utils/client-config.ts`:
+
+1. `pt_client_credentials`, la copia dall'ultimo accesso (canale ufficiale);
+2. lettura diretta della tabella `configurations` dell'Hub, quando l'app ne
+   condivide l'istanza Supabase. Copre il cliente con scansione automatica che
+   non ha ancora aperto l'app, e le chiavi aggiunte dopo l'ultimo accesso;
+3. variabili d'ambiente, solo per lo sviluppo locale.
+
+Se un amministratore aggiunge le chiavi mentre la sessione e' aperta, basta
+riaprire l'app dall'Hub per aggiornarne la copia.
+
+### Perche' la validazione e' lato server
+
 Due motivi, entrambi vincolanti:
 
 - **Le chiavi non entrano nel browser.** La skill `moca-auth-token` chiede che
@@ -113,7 +155,8 @@ netlify/functions/
     session.ts             firma e verifica del JWT applicativo
     guard.ts               wrapper degli endpoint autenticati
     supabase-admin.ts      client service_role
-    client-config.ts       lettura API key per cliente, autorizzazione
+    client-config.ts       risoluzione API key per cliente, autorizzazione
+    crypto.ts              cifratura a riposo delle configurazioni Hub
     dataforseo.ts          client Merchant API + SERP API
     matching.ts            motore di matching prodotto
     product-extract.ts     JSON-LD / microdata / Open Graph
@@ -143,10 +186,14 @@ Esegui la migration sull'istanza condivisa con l'Hub:
 
 ```bash
 psql "$DATABASE_URL" -f supabase/migrations/0001_price_tracker.sql
+psql "$DATABASE_URL" -f supabase/migrations/0002_client_credentials.sql
 ```
 
-Crea le tabelle con prefisso `pt_`, le policy RLS basate su `user_clients` e la
-funzione di aggregazione `pt_price_index` per la dashboard.
+La prima crea le tabelle con prefisso `pt_`, le policy RLS basate su
+`user_clients` e la funzione di aggregazione `pt_price_index` per la dashboard.
+La seconda crea `pt_client_credentials`, dove finiscono cifrate le
+configurazioni consegnate dall'Hub: ha la RLS attiva e nessuna policy, quindi e'
+raggiungibile solo dalla `service_role` delle Netlify Functions.
 
 ### 2. Configurazioni del cliente su Moca Hub
 
@@ -157,6 +204,10 @@ Un super_admin aggiunge, fra le `configurations` del cliente:
 | `DATAFORSEO_LOGIN` | login dell'account DataForSEO |
 | `DATAFORSEO_PASSWORD` | password dell'account DataForSEO |
 
+E' l'unico posto dove vanno inserite: l'app le riceve dall'Hub alla validazione
+del launch token e non le chiede mai altrove. Vedi *Dove passano le credenziali
+DataForSEO*.
+
 Senza queste chiavi l'app funziona in sola consultazione e la sezione Scansioni
 lo segnala esplicitamente.
 
@@ -166,7 +217,7 @@ lo segnala esplicitamente.
 |---|---|---|
 | `MOCA_HUB_URL` | server | URL dell'Hub |
 | `VITE_MOCA_HUB_URL` | build | idem, per la schermata Accesso Negato |
-| `APP_SESSION_SECRET` | server | `openssl rand -base64 48` |
+| `APP_SESSION_SECRET` | server | `openssl rand -base64 48`. Firma i JWT di sessione e, via HKDF, cifra le configurazioni cliente: cambiarlo invalida le sessioni e rende illeggibile la copia cifrata, che viene rigenerata al primo accesso |
 | `SUPABASE_URL` | server | |
 | `SUPABASE_SERVICE_ROLE_KEY` | server | **mai** con prefisso `VITE_` |
 | `DATAFORSEO_POSTBACK_SECRET` | server | `openssl rand -hex 32` |
@@ -202,7 +253,9 @@ npm run build       # build di produzione
 I test coprono la logica pura, cioe' le parti dove un errore silenzioso
 costerebbe di piu': validazione GTIN, parsing dei prezzi nelle diverse
 convenzioni locali, scoring dei match, estrazione JSON-LD, CSV con separatori e
-campi quotati, calcolo del posizionamento.
+campi quotati, calcolo del posizionamento, e il ciclo di cifratura delle
+configurazioni cliente (roundtrip, nonce diverso a ogni cifratura, rifiuto di
+payload manomessi e di chiavi sbagliate).
 
 ---
 
