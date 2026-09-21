@@ -4,8 +4,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 
 interface PostBody {
@@ -13,14 +12,14 @@ interface PostBody {
   all?: boolean;
 }
 
-export const handler: Handler = authed(['GET', 'POST'], async (event, session, headers) => {
+export const handler: Handler = withMoca(['GET', 'POST'], async (event, moca, headers) => {
   const db = supabaseAdmin();
 
   if (event.httpMethod === 'POST') {
-    requireWriteAccess(session);
+    requireWriteAccess(moca);
     const body = parseBody<PostBody>(event);
 
-    let query = db.from('pt_alerts').update({ is_read: true }).eq('client_id', session.clientId);
+    let query = db.from('pt_alerts').update({ is_read: true }).eq('client_id', moca.clientId);
     if (!body.all) {
       if (!body.ids?.length) throw new HttpError(400, 'Nessun alert indicato');
       query = query.in('id', body.ids.slice(0, 500));
@@ -39,7 +38,7 @@ export const handler: Handler = authed(['GET', 'POST'], async (event, session, h
   let query = db
     .from('pt_alerts')
     .select('id, kind, domain, message, own_price, competitor_price, delta_pct, is_read, created_at, product_id')
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .order('created_at', { ascending: false })
     .limit(limit);
 

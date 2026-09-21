@@ -24,7 +24,7 @@ const KIND_LABELS: Record<Alert['kind'], { label: string; tone: 'critico' | 'att
 };
 
 export function Avvisi() {
-  const { token, canWrite } = useMoca();
+  const { requestContext, canWrite } = useMoca();
   const [onlyUnread, setOnlyUnread] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -38,7 +38,7 @@ export function Avvisi() {
     setBusy(true);
     setActionError(null);
     try {
-      await apiPost(token, 'alerts', body);
+      await apiPost(requestContext, 'alerts', body);
       reload();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Operazione non riuscita');

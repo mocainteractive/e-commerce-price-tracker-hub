@@ -7,10 +7,9 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
-import { getDataForSeoCredentials } from './utils/client-config';
+import { resolveDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
 import { startScan } from './utils/scan-runner';
 import { loadScanSettings } from './utils/scan-settings';
@@ -19,8 +18,8 @@ interface RequestBody {
   productIds?: string[];
 }
 
-export const handler: Handler = authed(['POST'], async (event, session, headers) => {
-  requireWriteAccess(session);
+export const handler: Handler = withMoca(['POST'], async (event, moca, headers) => {
+  requireWriteAccess(moca);
 
   const db = supabaseAdmin();
   const body = parseBody<RequestBody>(event);
@@ -29,7 +28,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
   const { data: running } = await db
     .from('pt_scan_runs')
     .select('id, started_at')
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .eq('status', 'in_corso')
     .limit(1);
 
@@ -41,16 +40,16 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
     );
   }
 
-  const settings = await loadScanSettings(db, session.clientId);
-  const credentials = await getDataForSeoCredentials(session.clientId);
+  const settings = await loadScanSettings(db, moca.clientId);
+  const credentials = await resolveDataForSeoCredentials(moca.clientId, moca.dataForSeo);
   const dfs = new DataForSeoClient(credentials.login, credentials.password);
 
   const result = await startScan(db, dfs, {
-    clientId: session.clientId,
+    clientId: moca.clientId,
     settings,
     productIds: body.productIds,
     triggeredBy: 'manuale',
-    triggeredByUser: session.mock ? null : session.userId,
+    triggeredByUser: moca.userId || null,
   });
 
   return ok({ ...result }, headers);

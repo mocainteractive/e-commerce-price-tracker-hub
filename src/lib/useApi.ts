@@ -18,7 +18,7 @@ export function useApiGet<T>(
   path: string,
   params: Record<string, string | number | undefined> = {},
 ): ApiState<T> {
-  const { token } = useMoca();
+  const { requestContext } = useMoca();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +34,7 @@ export function useApiGet<T>(
     setError(null);
 
     try {
-      const result = await apiGet<T>(token, path, JSON.parse(paramsKey));
+      const result = await apiGet<T>(requestContext, path, JSON.parse(paramsKey));
       if (currentRequest === requestId.current) setData(result);
     } catch (err) {
       if (currentRequest !== requestId.current) return;
@@ -42,7 +42,7 @@ export function useApiGet<T>(
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }
-  }, [token, path, paramsKey]);
+  }, [requestContext, path, paramsKey]);
 
   useEffect(() => {
     void load();

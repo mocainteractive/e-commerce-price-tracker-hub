@@ -9,8 +9,7 @@
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
-import { authed } from './utils/guard';
-import { requireWriteAccess } from './utils/session';
+import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { extractProductFromUrl } from './utils/product-extract';
 
@@ -23,8 +22,8 @@ interface RequestBody {
   limit?: number;
 }
 
-export const handler: Handler = authed(['POST'], async (event, session, headers) => {
-  requireWriteAccess(session);
+export const handler: Handler = withMoca(['POST'], async (event, moca, headers) => {
+  requireWriteAccess(moca);
 
   const body = parseBody<RequestBody>(event);
   const limit = Math.min(body.limit ?? BATCH_SIZE, 50);
@@ -33,7 +32,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
   let query = db
     .from('pt_products')
     .select('id, product_url, currency, own_price')
-    .eq('client_id', session.clientId)
+    .eq('client_id', moca.clientId)
     .eq('is_active', true)
     .not('product_url', 'is', null)
     .limit(limit);
@@ -87,7 +86,7 @@ export const handler: Handler = authed(['POST'], async (event, session, headers)
         .eq('id', product.id);
 
       snapshots.push({
-        client_id: session.clientId,
+        client_id: moca.clientId,
         product_id: product.id,
         domain: null,
         is_own: true,

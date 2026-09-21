@@ -5,7 +5,7 @@
   functions = "netlify/functions"
 
 [build.environment]
-  # URL dell'Hub usato per validare i launch token (lato server).
+  # URL dell'Hub: l'SDK lo usa per validare il launch token dal browser.
   VITE_MOCA_HUB_URL = "https://moca-central-hub.netlify.app"
   NODE_VERSION = "20"
 

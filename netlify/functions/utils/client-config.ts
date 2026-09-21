@@ -1,13 +1,23 @@
 /**
- * Recupero server-side delle configurazioni di un cliente.
+ * Credenziali DataForSEO del cliente.
  *
- * Le API key vivono nella tabella `configurations` dell'Hub, scoped per
- * `client_id`. Vengono lette qui con la service_role e usate per le chiamate di
- * terzi: non vengono MAI restituite al browser ne' scritte nei log in chiaro.
+ * Percorso ufficiale (docs/APP_INTEGRATION_GUIDE.md dell'Hub):
+ *
+ *   configurazione cliente su Moca Hub
+ *        -> `configurations` nella risposta di validate-launch-token
+ *        -> l'SDK le espone al frontend con getConfig()
+ *        -> il frontend le passa a queste Netlify Functions nel body
+ *
+ * Le chiavi non sono mai hardcodate e non vivono in variabili d'ambiente
+ * dell'app: appartengono al cliente, non al deploy.
+ *
+ * Restano due percorsi senza browser, dove le credenziali non possono
+ * arrivare dal frontend: il postback di DataForSEO e la scansione
+ * pianificata. Per quelli si legge la tabella `configurations` dell'Hub con
+ * la service_role, che e' la stessa fonte da cui l'Hub le consegna.
  */
 import { HttpError } from './http';
 import { supabaseAdmin } from './supabase-admin';
-import { decryptJson } from './crypto';
 
 export interface DataForSeoCredentials {
   login: string;
@@ -20,136 +30,116 @@ export function mask(value: string): string {
   return `${value.slice(0, 3)}••••${value.slice(-4)}`;
 }
 
-async function readConfig(clientId: string, keys: string[]): Promise<Record<string, string>> {
-  const { data, error } = await supabaseAdmin()
-    .from('configurations')
-    .select('config_key, config_value')
-    .eq('client_id', clientId)
-    .in('config_key', keys);
+const NOT_CONFIGURED =
+  'Credenziali DataForSEO non configurate per questo cliente. Un amministratore deve impostare DATAFORSEO_LOGIN e DATAFORSEO_PASSWORD fra le configurazioni del cliente su Moca Hub, poi riapri l\'app dall\'Hub.';
 
-  if (error) {
-    // Sorgente di ripiego: se l'app non condivide l'istanza Supabase dell'Hub
-    // questa tabella non esiste. Non e' un errore fatale.
-    console.warn('[client-config] Lettura diretta di configurations non riuscita:', error.message);
-    return {};
-  }
+/**
+ * Credenziali per una richiesta che arriva dal browser.
+ * `forwarded` sono quelle che il frontend ha ricevuto dall'Hub via getConfig().
+ */
+export async function resolveDataForSeoCredentials(
+  clientId: string,
+  forwarded: DataForSeoCredentials | null,
+): Promise<DataForSeoCredentials> {
+  if (forwarded?.login && forwarded.password) return forwarded;
 
-  return Object.fromEntries((data ?? []).map((r) => [r.config_key, r.config_value as string]));
+  // Il frontend non le ha inoltrate: puo' succedere se la sessione e' stata
+  // aperta prima che l'amministratore configurasse le chiavi.
+  const fallback = await readFromHubConfigurations(clientId);
+  if (fallback) return fallback;
+
+  throw new HttpError(400, NOT_CONFIGURED, 'DATAFORSEO_NOT_CONFIGURED');
 }
 
 /**
- * Configurazioni del cliente, nell'ordine in cui vanno cercate.
- *
- * 1. `pt_client_credentials` - la copia cifrata di quanto l'Hub ha consegnato
- *    all'ultimo accesso. E' il canale ufficiale: le chiavi arrivano dalla
- *    configurazione cliente del Moca Hub, esattamente come per le altre app.
- *    Funziona anche senza utente collegato (postback, scansione pianificata).
- * 2. tabella `configurations` dell'Hub - lettura diretta, utile al primo giro
- *    (cliente con scansione automatica attiva che non ha ancora aperto l'app)
- *    e quando l'app condivide l'istanza Supabase dell'Hub.
- * 3. variabili d'ambiente - solo sviluppo locale.
+ * Credenziali per le esecuzioni senza browser (postback, scansione
+ * pianificata). Qui l'unica fonte possibile e' la tabella dell'Hub.
  */
-async function resolveConfig(clientId: string, keys: string[]): Promise<Record<string, string>> {
-  // Il mock locale non ha un client_id reale nell'Hub: salta le query.
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId);
-  if (!isUuid) return {};
+export async function loadDataForSeoCredentials(clientId: string): Promise<DataForSeoCredentials> {
+  const credentials = await readFromHubConfigurations(clientId);
+  if (credentials) return credentials;
 
-  const stored = await readStoredConfig(clientId);
-  if (keys.every((key) => stored[key])) return stored;
-
-  // Copia assente o incompleta (chiave aggiunta nell'Hub dopo l'ultimo
-  // accesso): completiamo da `configurations`, se raggiungibile.
-  const direct = await readConfig(clientId, keys);
-  return { ...stored, ...direct };
-}
-
-/** Legge e decifra la copia conservata all'ultimo accesso. */
-async function readStoredConfig(clientId: string): Promise<Record<string, string>> {
-  const { data, error } = await supabaseAdmin()
-    .from('pt_client_credentials')
-    .select('payload')
-    .eq('client_id', clientId)
-    .maybeSingle();
-
-  if (error) {
-    // Tabella assente o non raggiungibile: si prosegue con le altre sorgenti.
-    console.warn('[client-config] Copia configurazioni non disponibile:', error.message);
-    return {};
-  }
-  if (!data?.payload) return {};
-
-  return decryptJson<Record<string, string>>(data.payload) ?? {};
-}
-
-/**
- * Credenziali DataForSEO del cliente, dalla configurazione su Moca Hub.
- */
-export async function getDataForSeoCredentials(clientId: string): Promise<DataForSeoCredentials> {
-  const cfg = await resolveConfig(clientId, ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD']);
-
-  let login = cfg.DATAFORSEO_LOGIN ?? '';
-  let password = cfg.DATAFORSEO_PASSWORD ?? '';
-
-  if (!login || !password) {
-    login = login || process.env.DATAFORSEO_LOGIN || '';
-    password = password || process.env.DATAFORSEO_PASSWORD || '';
-    if (login && password) {
-      console.warn('[client-config] Uso credenziali DataForSEO da env (solo sviluppo locale)');
-    }
-  }
-
+  // Solo sviluppo locale: `netlify dev` non ha accesso alle configurazioni.
+  const login = process.env.DATAFORSEO_LOGIN ?? '';
+  const password = process.env.DATAFORSEO_PASSWORD ?? '';
   if (login && password) {
-    console.info(`[client-config] DataForSEO come ${mask(login)} per il cliente ${clientId}`);
+    console.warn('[client-config] Credenziali DataForSEO da env (solo sviluppo locale)');
+    return { login, password };
   }
 
-  if (!login || !password) {
-    throw new HttpError(
-      400,
-      'Credenziali DataForSEO non configurate per questo cliente. Un amministratore deve impostare DATAFORSEO_LOGIN e DATAFORSEO_PASSWORD fra le configurazioni del cliente su Moca Hub, poi riapri l\'app dall\'Hub per applicarle.',
-      'DATAFORSEO_NOT_CONFIGURED',
-    );
-  }
-
-  return { login, password };
+  throw new HttpError(400, NOT_CONFIGURED, 'DATAFORSEO_NOT_CONFIGURED');
 }
 
-/**
- * Le credenziali sono utilizzabili? Serve alla UI per avvisare subito, invece
- * di far fallire la prima scansione. Non restituisce mai i valori.
- */
-export async function hasDataForSeoConfigured(clientId: string): Promise<boolean> {
+/** Lettura diretta delle configurazioni cliente dell'Hub. */
+async function readFromHubConfigurations(
+  clientId: string,
+): Promise<DataForSeoCredentials | null> {
   try {
-    await getDataForSeoCredentials(clientId);
-    return true;
-  } catch {
-    return false;
+    const { data, error } = await supabaseAdmin()
+      .from('configurations')
+      .select('config_key, config_value')
+      .eq('client_id', clientId)
+      .in('config_key', ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD']);
+
+    if (error) {
+      console.warn('[client-config] Lettura configurations non riuscita:', error.message);
+      return null;
+    }
+
+    const map = Object.fromEntries(
+      (data ?? []).map((row) => [row.config_key, (row.config_value as string) ?? '']),
+    );
+    const login = map.DATAFORSEO_LOGIN?.trim();
+    const password = map.DATAFORSEO_PASSWORD?.trim();
+
+    if (!login || !password) return null;
+
+    console.info(`[client-config] DataForSEO come ${mask(login)} per il cliente ${clientId}`);
+    return { login, password };
+  } catch (err) {
+    // Supabase non configurato su questo deploy: non e' un errore fatale per
+    // le richieste che portano gia' le credenziali dal frontend.
+    console.warn('[client-config] Supabase non disponibile:', (err as Error).message);
+    return null;
   }
 }
 
 /**
- * Verifica che l'utente sia effettivamente assegnato al cliente.
- * Il JWT applicativo e' firmato da noi, ma la doppia verifica protegge dai
- * casi in cui l'assegnazione venga revocata nell'Hub durante la sessione.
+ * Verifica che l'utente sia assegnato al cliente.
+ *
+ * Come nelle altre app Moca, il contesto cliente arriva dal frontend dopo la
+ * validazione del launch token. Qui aggiungiamo un controllo in piu' perche'
+ * queste funzioni scrivono con la service_role, che scavalca la RLS: senza,
+ * un `client_id` alterato leggerebbe i dati di un altro cliente.
+ *
+ * Se le tabelle dell'Hub non sono raggiungibili il controllo viene saltato,
+ * per non bloccare i deploy che non condividono l'istanza Supabase.
  */
 export async function assertClientAccess(
   userId: string,
   clientId: string,
   role: string,
 ): Promise<void> {
-  if (role === 'super_admin' || role === 'manager') return;
+  if (!userId) return; // contesto senza utente (mock locale)
+  if (role === 'super_admin' || role === 'manager' || role === 'admin') return;
 
-  const { data, error } = await supabaseAdmin()
-    .from('user_clients')
-    .select('client_id')
-    .eq('user_id', userId)
-    .eq('client_id', clientId)
-    .maybeSingle();
+  try {
+    const { data, error } = await supabaseAdmin()
+      .from('user_clients')
+      .select('client_id')
+      .eq('user_id', userId)
+      .eq('client_id', clientId)
+      .maybeSingle();
 
-  if (error) {
-    console.error('[client-config] Verifica user_clients fallita:', error.message);
-    throw new HttpError(500, 'Impossibile verificare i permessi');
-  }
-  if (!data) {
-    throw new HttpError(403, 'Accesso negato a questo cliente', 'CLIENT_FORBIDDEN');
+    if (error) {
+      console.warn('[client-config] Verifica user_clients non riuscita:', error.message);
+      return;
+    }
+    if (!data) {
+      throw new HttpError(403, 'Accesso negato a questo cliente', 'CLIENT_FORBIDDEN');
+    }
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.warn('[client-config] Verifica permessi saltata:', (err as Error).message);
   }
 }

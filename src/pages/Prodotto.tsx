@@ -55,7 +55,7 @@ const METHOD_LABELS: Record<Match['match_method'], string> = {
 
 export function Prodotto() {
   const { productId } = useParams<{ productId: string }>();
-  const { token, canWrite } = useMoca();
+  const { requestContext, canWrite } = useMoca();
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -68,7 +68,7 @@ export function Prodotto() {
     setBusy(true);
     setActionError(null);
     try {
-      await apiPost(token, 'product-detail', { productId, ...body });
+      await apiPost(requestContext, 'product-detail', { productId, ...body });
       reload();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Operazione non riuscita');

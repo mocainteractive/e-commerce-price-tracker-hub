@@ -34,7 +34,7 @@ const STATUS_LABEL: Record<ScanRun['status'], string> = {
 };
 
 export function Scansioni() {
-  const { token, canWrite, hasDataForSeo } = useMoca();
+  const { requestContext, canWrite, hasDataForSeo } = useMoca();
   const { data, loading, error, reload } = useApiGet<RunsResponse>('scan-runs', { limit: 20 });
 
   const [busy, setBusy] = useState<'start' | 'collect' | 'prices' | null>(null);
@@ -51,7 +51,7 @@ export function Scansioni() {
     setActionError(null);
     setMessage(null);
     try {
-      const result = await apiPost<Record<string, number>>(token, path, body);
+      const result = await apiPost<Record<string, number>>(requestContext, path, body);
       setMessage(describe(result));
       reload();
     } catch (err) {

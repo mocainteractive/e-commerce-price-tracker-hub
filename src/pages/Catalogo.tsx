@@ -253,7 +253,7 @@ interface ImportResult {
 }
 
 function ImportPanel({ onDone }: { onDone: () => void }) {
-  const { token } = useMoca();
+  const { requestContext } = useMoca();
   const [source, setSource] = useState<'feed' | 'sitemap' | 'csv'>('feed');
   const [url, setUrl] = useState('');
   const [csvContent, setCsvContent] = useState('');
@@ -268,7 +268,7 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
     setResult(null);
 
     try {
-      const response = await apiPost<{ success: true } & ImportResult>(token, 'catalog-import', {
+      const response = await apiPost<{ success: true } & ImportResult>(requestContext, 'catalog-import', {
         source,
         feedUrl: source === 'feed' ? url : undefined,
         sitemapUrl: source === 'sitemap' ? url : undefined,
