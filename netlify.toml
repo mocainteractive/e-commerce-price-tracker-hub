@@ -1,0 +1,45 @@
+# Configurazione Netlify per l'app integrata Moca Hub "Price Tracker".
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  # URL dell'Hub usato per validare i launch token (lato server).
+  VITE_MOCA_HUB_URL = "https://moca-central-hub.netlify.app"
+  NODE_VERSION = "20"
+
+[functions]
+  node_bundler = "esbuild"
+  # Le utility condivise non sono endpoint: restano fuori dal deploy come funzioni.
+  included_files = ["netlify/functions/utils/**"]
+
+# La raccolta dei task DataForSEO puo' superare i 10s del piano standard.
+[functions."scan-collect"]
+  timeout = 26
+
+[functions."catalog-import"]
+  timeout = 26
+
+# Scansione automatica giornaliera (06:00 UTC) per i clienti che l'hanno attivata.
+[functions."scheduled-scan"]
+  schedule = "0 6 * * *"
+
+# Alias comodo: /api/* -> funzioni Netlify dell'app.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# SPA fallback: tutte le altre route servono index.html.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
