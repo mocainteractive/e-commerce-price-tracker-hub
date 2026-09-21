@@ -9,6 +9,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { AppHeader } from './components/AppHeader';
+import { StatoConfigurazione } from './components/StatoConfigurazione';
 import { Dashboard } from './pages/Dashboard';
 import { Catalogo } from './pages/Catalogo';
 import { Prodotto } from './pages/Prodotto';
@@ -58,7 +59,10 @@ export default function App() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        {/* Compare solo se la configurazione ha problemi: altrimenti non rende nulla. */}
+        <StatoConfigurazione />
+
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/catalogo" element={<Catalogo />} />

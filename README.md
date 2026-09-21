@@ -108,6 +108,7 @@ nulla.
 
 ```
 netlify/functions/
+  health.ts                diagnostica della configurazione (/api/health)
   catalog.ts               elenco catalogo con posizionamento
   catalog-import.ts        import da feed / CSV / sitemap
   product-detail.ts        scheda prodotto, storico, azioni sui match
@@ -189,6 +190,16 @@ lo segnala esplicitamente.
 Nessuna di queste contiene chiavi di clienti: quelle stanno sull'Hub. Senza le
 due variabili Supabase l'app si apre lo stesso, ma non puo' salvare lo storico
 ne' eseguire le scansioni pianificate.
+
+`SUPABASE_URL` va nella forma `https://<project-ref>.supabase.co`. Incollata
+senza schema veniva rifiutata dal client Supabase e ogni endpoint rispondeva
+con un errore generico: ora lo schema viene aggiunto in automatico e un valore
+davvero malformato produce un messaggio che dice cosa correggere.
+
+**Per verificare la configurazione** apri `/api/health`: elenca quali variabili
+mancano, se le tabelle esistono e se la funzione di aggregazione e'
+disponibile, senza mai mostrare valori di chiavi. Lo stesso esito compare in
+cima all'app quando qualcosa non va.
 
 ### 4. Deploy e registrazione
 
