@@ -27,6 +27,7 @@ import {
   parseSitemapXml,
   type CatalogRow,
 } from '../../netlify/functions/utils/feed';
+import { filtraUrlProdotto } from '../../netlify/functions/utils/sitemap-filter';
 
 /** Allineato a MAX_ROWS_PER_BATCH della funzione. */
 const RIGHE_PER_LOTTO = 200;
@@ -45,6 +46,11 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
   const [url, setUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [sostituisci, setSostituisci] = useState(false);
+  const [includi, setIncludi] = useState('');
+  const [escludi, setEscludi] = useState('');
+
+  const regoleInclude = includi.split(',').map((p) => p.trim()).filter(Boolean);
+  const regoleEscludi = escludi.split(',').map((p) => p.trim()).filter(Boolean);
 
   const avvia = () =>
     run(async (ctx) => {
@@ -54,7 +60,7 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
         sorgente === 'file'
           ? await daFile(file, ctx)
           : sorgente === 'sitemap'
-            ? await daSitemap(url, requestContext, ctx)
+            ? await daSitemap(url, requestContext, ctx, regoleInclude, regoleEscludi)
             : await daFeed(url, requestContext, ctx);
 
       if (righe.length === 0) {
@@ -156,6 +162,48 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
           </div>
         )}
 
+        {sorgente === 'sitemap' && (
+          <div className="grid gap-4 sm:grid-cols-2 rounded-xl bg-moca-bg p-4">
+            <div>
+              <label className="moca-label" htmlFor="sitemap-includi">
+                Tieni solo le URL che contengono
+              </label>
+              <input
+                id="sitemap-includi"
+                type="text"
+                value={includi}
+                onChange={(event) => setIncludi(event.target.value)}
+                disabled={state.running}
+                placeholder="/products/, /prodotto/"
+                className="moca-input"
+              />
+              <p className="mt-1 text-xs text-moca-gray">
+                Separa con la virgola. Lasciando vuoto, le schede prodotto vengono
+                riconosciute in automatico e si escludono blog, categorie, carrello
+                e pagine informative.
+              </p>
+            </div>
+
+            <div>
+              <label className="moca-label" htmlFor="sitemap-escludi">
+                Escludi anche le URL che contengono
+              </label>
+              <input
+                id="sitemap-escludi"
+                type="text"
+                value={escludi}
+                onChange={(event) => setEscludi(event.target.value)}
+                disabled={state.running}
+                placeholder="/outlet/, /usato/"
+                className="moca-input"
+              />
+              <p className="mt-1 text-xs text-moca-gray">
+                Si somma alle esclusioni automatiche.
+              </p>
+            </div>
+          </div>
+        )}
+
         <label className="flex items-center gap-2 text-sm text-moca-black">
           <input
             type="checkbox"
@@ -229,14 +277,34 @@ async function daSitemap(
   url: string,
   requestContext: ReturnType<typeof useMoca>['requestContext'],
   ctx: JobContext,
+  regoleInclude: string[],
+  regoleEscludi: string[],
 ): Promise<CatalogRow[]> {
   ctx.fase('Lettura della sitemap…');
 
   const urls = await raccogliUrlSitemap(url, requestContext, ctx);
   if (urls.length === 0) throw new Error('Nessuna URL di pagina trovata nella sitemap');
 
-  const daLeggere = urls.slice(0, MAX_PAGINE_SITEMAP);
-  ctx.nota(`${urls.length} URL trovate, ne verranno lette ${daLeggere.length}`);
+  // Una sitemap contiene anche categorie, blog e pagine statiche: leggerle
+  // tutte sprecherebbe la parte piu' lenta dell'import.
+  const filtrate = filtraUrlProdotto(urls, { include: regoleInclude, exclude: regoleEscludi });
+
+  ctx.nota(
+    `${urls.length} URL nella sitemap, ${filtrate.urls.length} sembrano schede prodotto ` +
+      `(${filtrate.scartate.perEsclusione} sezioni escluse, ${filtrate.scartate.perNonProdotto} non riconosciute, ` +
+      `${filtrate.scartate.perEstensione} file, ${filtrate.scartate.perDuplicato} duplicate)`,
+  );
+
+  if (filtrate.urls.length === 0) {
+    throw new Error(
+      'Nessuna pagina prodotto riconosciuta nella sitemap. Indica un frammento di URL nelle regole (per esempio /products/) e riprova.',
+    );
+  }
+
+  const daLeggere = filtrate.urls.slice(0, MAX_PAGINE_SITEMAP);
+  if (filtrate.urls.length > daLeggere.length) {
+    ctx.nota(`Limite di ${MAX_PAGINE_SITEMAP} pagine per import: le restanti al giro successivo`);
+  }
 
   const righe: CatalogRow[] = [];
   const gruppi = aLotti(daLeggere, URL_PER_CHIAMATA);

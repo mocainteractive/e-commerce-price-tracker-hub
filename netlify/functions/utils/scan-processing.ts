@@ -17,6 +17,7 @@ import {
   MATCH_MIN_SCORE,
   normalizeDomain,
   scoreMatch,
+  type MatchMethod,
   type MatchSubject,
 } from './matching';
 
@@ -50,7 +51,7 @@ export interface TaskRow {
   endpoint: 'products' | 'sellers';
 }
 
-interface OfferCandidate {
+export interface OfferCandidate {
   domain: string;
   sellerName: string | null;
   offerUrl: string;
@@ -61,6 +62,23 @@ interface OfferCandidate {
   currency: string;
   availability: string | null;
   condition: string | null;
+  /** Esito del matching, quando la fonte ha richiesto una valutazione. */
+  matchMethod?: MatchMethod;
+  confidence?: number;
+}
+
+/**
+ * Da dove arriva un gruppo di offerte. Serve a `persistOffers`, che e'
+ * condiviso fra la SERP organica (sincrona) e i task di Google Shopping.
+ */
+export interface OfferContext {
+  runId: string | null;
+  /** Valore salvato in `pt_price_snapshots.source`. */
+  source: string;
+  /** Metodo di match da usare quando l'offerta non ne porta uno proprio. */
+  defaultMatchMethod: MatchMethod;
+  /** Affidabilita' di default, idem. */
+  defaultConfidence: number;
 }
 
 /**
@@ -90,7 +108,18 @@ export async function processTask(
         ? await collectFromSellers(dfs, task, product)
         : await collectFromProducts(db, dfs, task, product, settings);
 
-    const saved = await persistOffers(db, task, product, offers, settings);
+    const saved = await persistOffers(
+      db,
+      {
+        runId: task.run_id,
+        source: task.endpoint === 'sellers' ? 'google_sellers' : 'google_shopping',
+        defaultMatchMethod: task.endpoint === 'sellers' ? 'gtin' : 'google_shopping',
+        defaultConfidence: task.endpoint === 'sellers' ? 1 : MATCH_MIN_SCORE,
+      },
+      product,
+      offers,
+      settings,
+    );
     await markTask(db, task.id, 'completato');
     return saved;
   } catch (err) {
@@ -284,9 +313,9 @@ function mapAvailability(raw: string | null | undefined): string | null {
 // Persistenza
 // -----------------------------------------------------------------------------
 
-async function persistOffers(
+export async function persistOffers(
   db: SupabaseClient,
-  task: TaskRow,
+  ctx: OfferContext,
   product: ProductRow,
   offers: OfferCandidate[],
   settings: ScanSettings,
@@ -330,8 +359,8 @@ async function persistOffers(
         seller_name: offer.sellerName,
         offer_url: offer.offerUrl,
         offer_title: offer.offerTitle,
-        match_method: task.endpoint === 'sellers' ? 'gtin' : 'google_shopping',
-        confidence: task.endpoint === 'sellers' ? 1 : MATCH_MIN_SCORE,
+        match_method: offer.matchMethod ?? ctx.defaultMatchMethod,
+        confidence: offer.confidence ?? ctx.defaultConfidence,
         last_seen_at: now,
       })),
       { onConflict: 'product_id,domain,offer_url', ignoreDuplicates: false },
@@ -359,7 +388,7 @@ async function persistOffers(
       currency: offer.currency,
       availability: offer.availability,
       condition: offer.condition,
-      source: task.endpoint === 'sellers' ? 'google_sellers' : 'google_shopping',
+      source: ctx.source,
       captured_at: now,
     })),
     { onConflict: 'product_id,domain_key,captured_on', ignoreDuplicates: false },
@@ -370,7 +399,7 @@ async function persistOffers(
     return 0;
   }
 
-  await createAlerts(db, task, product, deduped, ownDomains, settings);
+  await createAlerts(db, ctx, product, deduped, ownDomains, settings);
   return deduped.length;
 }
 
@@ -380,7 +409,7 @@ async function persistOffers(
  */
 async function createAlerts(
   db: SupabaseClient,
-  task: TaskRow,
+  ctx: OfferContext,
   product: ProductRow,
   offers: OfferCandidate[],
   ownDomains: Set<string>,
@@ -427,7 +456,7 @@ async function createAlerts(
     alerts.map((alert) => ({
       client_id: product.client_id,
       product_id: product.id,
-      run_id: task.run_id,
+      run_id: ctx.runId,
       own_price: ownPrice,
       ...alert,
     })),

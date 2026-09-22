@@ -10,10 +10,11 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --force",
     "lint": "tsc -b --force",
-    "test": "npm run test:unit && npm run test:supabase",
+    "test": "npm run test:unit && npm run test:supabase && npm run test:matching",
     "test:unit": "esbuild tests/unit-checks.ts --bundle --platform=node --target=node20 --format=esm --outfile=node_modules/.cache/unit-checks.mjs --log-level=warning && node node_modules/.cache/unit-checks.mjs",
     "test:supabase": "esbuild tests/supabase-client.ts --bundle --platform=node --target=node20 --format=esm --outfile=node_modules/.cache/supabase-client.mjs --log-level=warning && node node_modules/.cache/supabase-client.mjs",
-    "netlify:dev": "netlify dev"
+    "netlify:dev": "netlify dev",
+    "test:matching": "esbuild tests/serp-matching.ts --bundle --platform=node --target=node20 --format=esm --outfile=node_modules/.cache/serp-matching.mjs --log-level=warning && node node_modules/.cache/serp-matching.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": ">=2.94.0 <2.110.0",

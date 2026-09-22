@@ -23,6 +23,8 @@ interface SettingsPayload {
   overprice_threshold?: number;
   auto_scan_enabled?: boolean;
   max_products_per_scan?: number;
+  search_source?: 'serp' | 'shopping' | 'entrambe';
+  search_gtin_pass?: boolean;
 }
 
 interface RequestBody {
@@ -95,6 +97,8 @@ async function updateSettings(clientId: string, payload: SettingsPayload): Promi
   if (payload.language_code !== undefined) patch.language_code = payload.language_code;
   if (payload.currency !== undefined) patch.currency = payload.currency;
   if (payload.auto_scan_enabled !== undefined) patch.auto_scan_enabled = payload.auto_scan_enabled;
+  if (payload.search_source !== undefined) patch.search_source = payload.search_source;
+  if (payload.search_gtin_pass !== undefined) patch.search_gtin_pass = payload.search_gtin_pass;
 
   if (payload.undercut_threshold !== undefined) {
     patch.undercut_threshold = clamp(payload.undercut_threshold, 0, 100, 'Soglia sottoprezzo');
@@ -150,5 +154,7 @@ function defaultSettings(clientId: string) {
     overprice_threshold: 5,
     auto_scan_enabled: false,
     max_products_per_scan: 200,
+    search_source: 'serp',
+    search_gtin_pass: false,
   };
 }

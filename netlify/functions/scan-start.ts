@@ -84,6 +84,25 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   }
 
   const runId = run.id as string;
+
+  // Con la SERP organica non c'e' nulla da accodare: la ricerca e' sincrona
+  // e il browser chiama direttamente `scan-serp` lotto dopo lotto.
+  if (settings.search_source === 'serp') {
+    return ok(
+      {
+        runId,
+        productsTotal,
+        fonte: 'serp',
+        enqueued: 0,
+        tasksCreated: 0,
+        nextOffset: 0,
+        remaining: productsTotal,
+        cercaAncheEan: settings.search_gtin_pass,
+      },
+      headers,
+    );
+  }
+
   const batch = await enqueueBatch(db, dfs, {
     clientId: moca.clientId,
     runId,
@@ -96,11 +115,13 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
     {
       runId,
       productsTotal,
+      fonte: settings.search_source,
       enqueued: batch.enqueued,
       tasksCreated: batch.tasksCreated,
       nextOffset: batch.nextOffset,
       remaining: Math.max(productsTotal - batch.nextOffset, 0),
       batchSize: PRODUCTS_PER_CALL,
+      cercaAncheEan: settings.search_gtin_pass,
     },
     headers,
   );

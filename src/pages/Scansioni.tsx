@@ -56,13 +56,72 @@ export function Scansioni() {
       const inizio = await apiPost<{
         runId: string;
         productsTotal: number;
+        fonte: 'serp' | 'shopping' | 'entrambe';
         tasksCreated: number;
         nextOffset: number;
         remaining: number;
+        cercaAncheEan: boolean;
       }>(requestContext, 'scan-start', {});
 
       ctx.nota(`Scansione avviata su ${inizio.productsTotal} prodotti`);
 
+      // --- SERP organica: sincrona, i prezzi si salvano subito -------------
+      if (inizio.fonte === 'serp') {
+        ctx.fase('Ricerca dei prodotti su Google…');
+        let offset = 0;
+        let offerte = 0;
+        let senzaRisultati = 0;
+
+        for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
+          verificaAnnullamento(ctx);
+
+          const lotto = await apiPost<{
+            analizzati: number;
+            offerte: number;
+            nextOffset: number;
+            remaining: number;
+            diagnostiche: Array<{
+              titolo: string;
+              query: string[];
+              risultati: number;
+              conPrezzo: number;
+              accettati: number;
+              offerteSalvate: number;
+              errore: string | null;
+            }>;
+          }>(requestContext, 'scan-serp', {
+            runId: inizio.runId,
+            offset,
+            cercaAncheEan: inizio.cercaAncheEan,
+          });
+
+          if (lotto.analizzati === 0) break;
+
+          offset = lotto.nextOffset;
+          offerte += lotto.offerte;
+          ctx.avanzamento(offset, inizio.productsTotal);
+
+          // Il diario spiega prodotto per prodotto cosa e' successo: e' quello
+          // che permette di capire una scansione che non trova nulla.
+          for (const d of lotto.diagnostiche) {
+            if (d.offerteSalvate === 0) senzaRisultati += 1;
+            ctx.nota(
+              d.errore
+                ? `${d.titolo}: ${d.errore}`
+                : `${d.titolo}: ${d.risultati} risultati, ${d.conPrezzo} con prezzo, ${d.accettati} riconosciuti, ${d.offerteSalvate} salvati`,
+            );
+          }
+
+          if (lotto.remaining === 0) break;
+        }
+
+        reload();
+        return offerte === 0
+          ? `Analizzati ${formatNumber(offset)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
+          : `Analizzati ${formatNumber(offset)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
+      }
+
+      // --- Google Shopping: asincrono, si accodano i task ------------------
       let offset = inizio.nextOffset;
       let tasks = inizio.tasksCreated;
       ctx.fase('Accodamento delle richieste su DataForSEO…');

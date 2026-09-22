@@ -97,6 +97,7 @@ l'avanzamento e permettendo di annullare.
 | `catalog-save` | 200 prodotti | browser |
 | `catalog-finalize` | 300 disattivazioni | browser |
 | `extract-pages` | 5 pagine prodotto | browser |
+| `scan-serp` | 3 prodotti cercati | browser |
 | `scan-start` / `scan-enqueue` | 50 prodotti accodati | browser |
 | `scan-collect` | 15 task raccolti | browser |
 | `own-price-refresh` | 8 pagine lette | browser |
@@ -112,7 +113,59 @@ Un feed generato al volo puo' comunque essere troppo lento per i 10 secondi
 del proxy: in quel caso l'errore lo dice, e la via d'uscita e' salvare il feed
 in un file e caricarlo, che e' interamente lato browser.
 
-### Il flusso di scansione
+**Import da sitemap.** Una sitemap elenca anche categorie, blog e pagine
+statiche: leggerle tutte sprecherebbe la parte piu' lenta dell'import. Le
+schede prodotto vengono riconosciute automaticamente (segmenti tipici delle
+piattaforme diffuse, esclusione di blog, carrello, pagine informative e file),
+e la regola si puo' forzare indicando un frammento di URL.
+
+### Come vengono trovati i prezzi
+
+**La fonte predefinita e' la SERP organica di Google**, non Google Shopping.
+La scelta viene da una verifica sul campo, non da una preferenza:
+
+* e' **sincrona**: al termine della scansione i prezzi sono gia' salvati.
+  Con Google Shopping, che e' asincrono, "nessun risultato" e "risultato non
+  ancora pronto" sono indistinguibili, ed e' esattamente il modo in cui una
+  scansione puo' sembrare finita senza aver trovato niente;
+* i suoi item **portano gia' il prezzo** mostrato nello snippet, che gli
+  e-commerce espongono quasi sempre.
+
+**La query non e' mai il solo codice EAN.** Sembrava la scelta ovvia ed era la
+causa delle scansioni a vuoto: un numero isolato su Google porta pochi
+risultati pertinenti e molti estranei, perche' i venditori raramente
+pubblicano l'EAN nel testo. Misurato su un caso reale:
+
+| Query | Risultato |
+|---|---|
+| `8056590473955` | 3 venditori giusti su 10, il resto ammorbidenti e shampoo |
+| `Venezianico 6121503C Orologio Automatico Arsenale 37` | 4 venditori con prezzo |
+
+La forma che funziona e' quella che userebbe una persona: marca, codice
+modello e nome. L'EAN resta disponibile come **passata aggiuntiva**
+facoltativa: quando un venditore lo pubblica davvero, il riconoscimento e'
+certo.
+
+Il motore di matching scarta comunque il rumore (0% di punteggio per gli
+articoli estranei) e distingue le varianti dello stesso modello: un
+`6121501C` non viene confuso con un `6121503C`, pur avendo titolo quasi
+identico e prezzo uguale. `tests/serp-matching.ts` verifica tutto questo sui
+dati veri.
+
+### Capire una scansione che non trova nulla
+
+`/api/scan-debug`, esposto nella scheda prodotto come **Prova la ricerca**,
+esegue la ricerca senza salvare e mostra la query inviata, i risultati
+tornati, e per ognuno il punteggio di somiglianza con il motivo per cui e'
+stato tenuto o scartato.
+
+Esiste perche' "non ha trovato nulla" non e' una diagnosi: con un motore di
+matching servono i numeri, altrimenti si tira a indovinare fra dieci cause
+possibili. Anche il diario della scansione riporta, prodotto per prodotto,
+quanti risultati sono arrivati, quanti avevano un prezzo e quanti sono stati
+riconosciuti.
+
+### Il flusso Google Shopping (fonte alternativa)
 
 Gli endpoint Google Shopping di DataForSEO **non hanno modalita' live**: sono
 `task_post` → `task_get`. Da qui la forma asincrona:
@@ -147,6 +200,8 @@ netlify/functions/
   dashboard.ts             KPI, serie storica, classifica competitor
   settings.ts              impostazioni + gestione domini competitor
   alerts.ts                elenco avvisi e "segna come letto"
+  scan-serp.ts             ricerca sulla SERP organica, fonte principale
+  scan-debug.ts            diagnostica della ricerca su un singolo prodotto
   scan-start.ts            crea la scansione e accoda il primo lotto
   scan-enqueue.ts          accoda i lotti successivi
   scan-collect.ts          raccolta risultati (riserva del postback)
@@ -165,6 +220,8 @@ netlify/functions/
     pricing.ts             confronto e posizionamento prezzo
     price-queries.ts       letture sullo storico
     remote-fetch.ts        download esterni con budget di tempo ed errori chiari
+    serp-scan.ts           ricerca, matching e diagnostica su SERP
+    sitemap-filter.ts      riconoscimento delle pagine prodotto
     scan-runner.ts         accodamento e raccolta, a lotti
     scan-processing.ts     risultati DataForSEO -> match, storico, avvisi
     scan-settings.ts       impostazioni con default
@@ -179,6 +236,7 @@ src/
 supabase/migrations/0001_price_tracker.sql
 tests/unit-checks.ts        logica pura: matching, parser, prezzi
 tests/supabase-client.ts    regressione sul client Supabase senza WebSocket
+tests/serp-matching.ts      matching su feed e risultati di ricerca reali
 ```
 
 ---
@@ -191,10 +249,13 @@ Esegui la migration sull'istanza condivisa con l'Hub:
 
 ```bash
 psql "$DATABASE_URL" -f supabase/migrations/0001_price_tracker.sql
+psql "$DATABASE_URL" -f supabase/migrations/0002_serp_source_e_sitemap.sql
 ```
 
-Crea le tabelle con prefisso `pt_`, le policy RLS basate su `user_clients` e la
-funzione di aggregazione `pt_price_index` per la dashboard.
+La prima crea le tabelle con prefisso `pt_`, le policy RLS basate su
+`user_clients` e la funzione di aggregazione `pt_price_index` per la dashboard.
+La seconda aggiunge la scelta della fonte di ricerca e le regole per le
+sitemap. Senza la seconda l'app funziona comunque, usando i valori di default.
 
 ### 2. Configurazioni del cliente su Moca Hub
 

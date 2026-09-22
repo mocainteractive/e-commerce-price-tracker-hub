@@ -64,6 +64,8 @@ export function Impostazioni() {
           overprice_threshold: Number(form.overprice_threshold),
           auto_scan_enabled: form.auto_scan_enabled,
           max_products_per_scan: Number(form.max_products_per_scan),
+          search_source: form.search_source,
+          search_gtin_pass: form.search_gtin_pass,
         },
       });
       setSaved(true);
@@ -214,6 +216,53 @@ export function Impostazioni() {
               ))}
             </select>
           </div>
+        </div>
+      </Card>
+
+      <Card title="Come cercare i prezzi">
+        <div className="space-y-4">
+          <div>
+            <label className="moca-label" htmlFor="search-source">
+              Fonte dei prezzi
+            </label>
+            <select
+              id="search-source"
+              value={form.search_source ?? 'serp'}
+              onChange={(event) =>
+                update('search_source', event.target.value as Settings['search_source'])
+              }
+              disabled={!canWrite}
+              className="moca-input"
+            >
+              <option value="serp">Ricerca Google (consigliata)</option>
+              <option value="shopping">Google Shopping</option>
+            </select>
+            <p className="mt-1 text-xs text-moca-gray">
+              La ricerca Google e' immediata e i risultati portano gia' il prezzo:
+              al termine della scansione i dati ci sono. Google Shopping lavora
+              invece a richieste asincrone, quindi i risultati arrivano dopo e
+              vanno raccolti.
+            </p>
+          </div>
+
+          <label className="flex items-start gap-3 text-sm text-moca-black">
+            <input
+              type="checkbox"
+              checked={form.search_gtin_pass ?? false}
+              onChange={(event) => update('search_gtin_pass', event.target.checked)}
+              disabled={!canWrite}
+              className="mt-0.5 rounded border-gray-300 text-moca-red focus:ring-moca-red"
+            />
+            <span>
+              Cerca anche il solo codice EAN
+              <span className="block text-xs text-moca-gray mt-0.5">
+                Raddoppia il costo della scansione. Utile quando i venditori
+                pubblicano il codice nella scheda: in quel caso il riconoscimento
+                e' certo. Da solo pero' porta molti risultati estranei, per questo
+                non e' la ricerca principale.
+              </span>
+            </span>
+          </label>
         </div>
       </Card>
 

@@ -26,6 +26,7 @@ import {
   PriceRangeBar,
 } from '../components/ui';
 import { PriceLineChart, type ChartSeries } from '../components/PriceLineChart';
+import { DiagnosticaRicerca } from '../components/DiagnosticaRicerca';
 import { buildColorMap, MAX_SERIES } from '../lib/chart-palette';
 import {
   formatAvailability,
@@ -159,6 +160,8 @@ export function Prodotto() {
           </div>
         </div>
       </Card>
+
+      {productId && <DiagnosticaRicerca productId={productId} onSaved={reload} />}
 
       <Card title="Andamento prezzi, ultimi 90 giorni">
         <PriceLineChart series={buildSeries(history)} currency={currency} />
