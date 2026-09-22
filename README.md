@@ -83,6 +83,35 @@ che scavalca la RLS, quindi e' l'unica cosa che impedisce a un `client_id`
 alterato di leggere i dati di un altro cliente. Se le tabelle dell'Hub non sono
 raggiungibili il controllo viene saltato invece di bloccare l'app.
 
+### Tempi di esecuzione: il browser orchestra, le funzioni lavorano a lotti
+
+Le Netlify Functions hanno circa **10 secondi**. Un import di qualche migliaio
+di prodotti o una scansione su un catalogo intero ne richiedono molti di piu'.
+La soluzione non e' chiedere piu' tempo alla piattaforma, ma spezzare il
+lavoro: **ogni funzione fa un lotto e dice quanto resta**, e il browser, che
+limiti di durata non ne ha, ripete finche' non ha finito, mostrando
+l'avanzamento e permettendo di annullare.
+
+| Operazione | Per chiamata | Chi scorre |
+|---|---|---|
+| `catalog-save` | 200 prodotti | browser |
+| `catalog-finalize` | 300 disattivazioni | browser |
+| `extract-pages` | 5 pagine prodotto | browser |
+| `scan-start` / `scan-enqueue` | 50 prodotti accodati | browser |
+| `scan-collect` | 15 task raccolti | browser |
+| `own-price-refresh` | 8 pagine lette | browser |
+| `scheduled-scan` | budget di 8 secondi | si ferma e riprende il giorno dopo |
+
+Dove possibile il lavoro non tocca proprio il server: **CSV e XML vengono letti
+e interpretati nel browser**, e per le URL il browser tenta prima il download
+diretto, passando dal proxy `fetch-source` solo quando il CORS glielo
+impedisce. Gli stessi parser (`utils/feed.ts`) girano da entrambe le parti:
+una sola implementazione, nessuna possibilita' che divergano.
+
+Un feed generato al volo puo' comunque essere troppo lento per i 10 secondi
+del proxy: in quel caso l'errore lo dice, e la via d'uscita e' salvare il feed
+in un file e caricarlo, che e' interamente lato browser.
+
 ### Il flusso di scansione
 
 Gli endpoint Google Shopping di DataForSEO **non hanno modalita' live**: sono
@@ -110,12 +139,16 @@ nulla.
 netlify/functions/
   health.ts                diagnostica della configurazione (/api/health)
   catalog.ts               elenco catalogo con posizionamento
-  catalog-import.ts        import da feed / CSV / sitemap
+  fetch-source.ts          proxy per feed e sitemap senza CORS
+  extract-pages.ts         lettura dei dati strutturati, poche pagine per volta
+  catalog-save.ts          salvataggio di un lotto di prodotti
+  catalog-finalize.ts      disattivazione dei prodotti non piu' nel catalogo
   product-detail.ts        scheda prodotto, storico, azioni sui match
   dashboard.ts             KPI, serie storica, classifica competitor
   settings.ts              impostazioni + gestione domini competitor
   alerts.ts                elenco avvisi e "segna come letto"
-  scan-start.ts            avvio scansione
+  scan-start.ts            crea la scansione e accoda il primo lotto
+  scan-enqueue.ts          accoda i lotti successivi
   scan-collect.ts          raccolta risultati (riserva del postback)
   dataforseo-postback.ts   callback pubblico, protetto da segreto condiviso
   own-price-refresh.ts     rilettura prezzi dal sito del cliente
@@ -131,19 +164,21 @@ netlify/functions/
     feed.ts                feed Merchant, CSV, sitemap
     pricing.ts             confronto e posizionamento prezzo
     price-queries.ts       letture sullo storico
-    scan-runner.ts         avvio e raccolta di una scansione
+    remote-fetch.ts        download esterni con budget di tempo ed errori chiari
+    scan-runner.ts         accodamento e raccolta, a lotti
     scan-processing.ts     risultati DataForSEO -> match, storico, avvisi
     scan-settings.ts       impostazioni con default
 
 public/moca-sdk.js         SDK ufficiale dell'Hub (copia da docs/moca-sdk/)
 
 src/
-  lib/       MocaProvider, moca-types, api, useApi, tipi, formattazione, palette
-  components/ AppHeader, ui, PriceLineChart
+  lib/       MocaProvider, moca-types, api, useApi, useJob, tipi, formattazione, palette
+  components/ AppHeader, ui, PriceLineChart, ImportCatalogo, JobProgress, StatoConfigurazione
   pages/     Dashboard, Catalogo, Prodotto, Competitor, Scansioni, Avvisi, Impostazioni
 
 supabase/migrations/0001_price_tracker.sql
-tests/unit-checks.ts
+tests/unit-checks.ts        logica pura: matching, parser, prezzi
+tests/supabase-client.ts    regressione sul client Supabase senza WebSocket
 ```
 
 ---

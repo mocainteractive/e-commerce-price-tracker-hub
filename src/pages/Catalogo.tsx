@@ -4,11 +4,11 @@
  */
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Download, Package, RefreshCw, Search, Upload } from 'lucide-react';
+import { Package, Search, Upload } from 'lucide-react';
 import { useApiGet } from '../lib/useApi';
-import { apiPost, ApiError } from '../lib/api';
 import { useMoca } from '../lib/MocaProvider';
 import { Card, EmptyState, ErrorBanner, LoadingBlock, PositionBadge } from '../components/ui';
+import { ImportCatalogo } from '../components/ImportCatalogo';
 import { formatNumber, formatPercent, formatPrice } from '../lib/format';
 import type { CatalogItem, PricePosition } from '../lib/types';
 
@@ -77,14 +77,7 @@ export function Catalogo() {
         )}
       </div>
 
-      {showImport && canWrite && (
-        <ImportPanel
-          onDone={() => {
-            setShowImport(false);
-            reload();
-          }}
-        />
-      )}
+      {showImport && canWrite && <ImportCatalogo onDone={reload} />}
 
       <Card>
         <div className="flex flex-wrap items-center gap-3 mb-5">
@@ -240,163 +233,5 @@ export function Catalogo() {
         )}
       </Card>
     </div>
-  );
-}
-
-// -----------------------------------------------------------------------------
-
-interface ImportResult {
-  imported: number;
-  deactivated: number;
-  withGtin: number;
-  withoutPrice: number;
-}
-
-function ImportPanel({ onDone }: { onDone: () => void }) {
-  const { requestContext } = useMoca();
-  const [source, setSource] = useState<'feed' | 'sitemap' | 'csv'>('feed');
-  const [url, setUrl] = useState('');
-  const [csvContent, setCsvContent] = useState('');
-  const [replace, setReplace] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(null);
-
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    setResult(null);
-
-    try {
-      const response = await apiPost<{ success: true } & ImportResult>(requestContext, 'catalog-import', {
-        source,
-        feedUrl: source === 'feed' ? url : undefined,
-        sitemapUrl: source === 'sitemap' ? url : undefined,
-        csvContent: source === 'csv' ? csvContent : undefined,
-        replace,
-      });
-      setResult(response);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Import non riuscito');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card title="Importa il catalogo">
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          {[
-            { value: 'feed' as const, label: 'Feed Google Merchant' },
-            { value: 'sitemap' as const, label: 'Sitemap del sito' },
-            { value: 'csv' as const, label: 'File CSV' },
-          ].map((option) => (
-            <button
-              key={option.value}
-              onClick={() => setSource(option.value)}
-              className={`px-3 py-1.5 text-sm rounded-md border transition-colors ${
-                source === option.value
-                  ? 'bg-moca-red-light text-moca-red border-moca-red'
-                  : 'text-moca-black border-gray-300 hover:bg-gray-100'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-
-        {source === 'csv' ? (
-          <div>
-            <label className="moca-label" htmlFor="csv-file">
-              File CSV
-            </label>
-            <input
-              id="csv-file"
-              type="file"
-              accept=".csv,text/csv"
-              className="moca-input"
-              onChange={async (event) => {
-                const file = event.target.files?.[0];
-                if (file) setCsvContent(await file.text());
-              }}
-            />
-            <p className="mt-1 text-xs text-moca-gray">
-              Colonne riconosciute: titolo, sku, ean, mpn, marca, prezzo, url, immagine.
-              Separatore virgola o punto e virgola.
-            </p>
-          </div>
-        ) : (
-          <div>
-            <label className="moca-label" htmlFor="import-url">
-              {source === 'feed' ? 'URL del feed' : 'URL della sitemap'}
-            </label>
-            <input
-              id="import-url"
-              type="url"
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder={
-                source === 'feed'
-                  ? 'https://www.esempio.it/feed-google-shopping.xml'
-                  : 'https://www.esempio.it/sitemap-prodotti.xml'
-              }
-              className="moca-input"
-            />
-            {source === 'sitemap' && (
-              <p className="mt-1 text-xs text-moca-gray">
-                Le pagine vengono lette una a una per estrarre i dati strutturati:
-                l'import da sitemap e' piu' lento e si ferma a 150 prodotti per volta.
-              </p>
-            )}
-          </div>
-        )}
-
-        <label className="flex items-center gap-2 text-sm text-moca-black">
-          <input
-            type="checkbox"
-            checked={replace}
-            onChange={(event) => setReplace(event.target.checked)}
-            className="rounded border-gray-300 text-moca-red focus:ring-moca-red"
-          />
-          Disattiva i prodotti non presenti in questo import
-        </label>
-
-        {error && <ErrorBanner message={error} />}
-
-        {result && (
-          <div className="rounded-lg bg-success/10 p-4 text-sm">
-            <p className="font-medium text-moca-black">
-              {formatNumber(result.imported)} prodotti importati
-            </p>
-            <p className="mt-1 text-moca-gray">
-              {formatNumber(result.withGtin)} con codice EAN
-              {result.withoutPrice > 0 && ` · ${formatNumber(result.withoutPrice)} senza prezzo`}
-              {result.deactivated > 0 && ` · ${formatNumber(result.deactivated)} disattivati`}
-            </p>
-            <p className="mt-2 text-xs text-moca-gray">
-              I prodotti con codice EAN vengono riconosciuti con certezza sugli altri
-              siti: piu' ne hai, piu' il confronto e' affidabile.
-            </p>
-          </div>
-        )}
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={submit}
-            disabled={busy || (source === 'csv' ? !csvContent : !url)}
-            className="moca-btn-primary"
-          >
-            {busy ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
-            {busy ? 'Import in corso…' : 'Avvia import'}
-          </button>
-          {result && (
-            <button onClick={onDone} className="moca-btn-secondary">
-              Chiudi e aggiorna
-            </button>
-          )}
-        </div>
-      </div>
-    </Card>
   );
 }
