@@ -10,11 +10,9 @@
  *      postback);
  *   2. alle 06 UTC, se oggi non e' ancora partita, crea la scansione del
  *      giorno con la fonte scelta nelle impostazioni;
- *   3. fa avanzare le scansioni SERP aperte di qualche prodotto, con le
- *      stesse regole della scansione manuale (scheda del venditore, AI).
- *
- * Prima accodava sempre task Google Shopping una volta al giorno, anche con
- * la fonte SERP: costi e risultati diversi da quelli della scansione manuale.
+ *   3. per le scansioni SERP aperte: accoda le ricerche che mancano e
+ *      raccoglie quelle pronte, con le stesse regole della scansione manuale
+ *      (scheda del venditore, AI).
  */
 import type { Handler } from '@netlify/functions';
 import { supabaseAdmin } from './utils/supabase-admin';
@@ -23,14 +21,12 @@ import { DataForSeoClient } from './utils/dataforseo';
 import { collectPendingTasks, enqueueBatch } from './utils/scan-runner';
 import { loadScanSettings, type FullScanSettings } from './utils/scan-settings';
 import {
-  addOffersFound,
   createRun,
   refreshRunStatus,
-  type ProductRow,
   type RunRow,
   type RunSource,
 } from './utils/scan-processing';
-import { caricaContestoDomini, caricaEsclusiProdotto, scansionaProdotto } from './utils/serp-scan';
+import { accodaRicerche, contaProdottiAccodati, raccogliRicerche } from './utils/serp-tasks';
 
 /** Budget complessivo: sotto il limite della piattaforma, con margine. */
 const BUDGET_MS = 8500;
@@ -75,8 +71,7 @@ export const handler: Handler = async () => {
       // 2. Scansione del giorno.
       let runs = await loadOpenRuns(db, clientId);
       if (runs.length === 0 && oraDiAvvio() && !(await giaAvviataOggi(db, clientId))) {
-        const run = await avviaScansioneDelGiorno(db, dfs, clientId, settings, timeLeft);
-        esito.nuovaRun = run;
+        esito.nuovaRun = await avviaScansioneDelGiorno(db, dfs, clientId, settings, timeLeft);
         runs = await loadOpenRuns(db, clientId);
       }
 
@@ -84,10 +79,7 @@ export const handler: Handler = async () => {
       for (const run of runs) {
         const source: RunSource = run.search_source ?? 'serp';
         if (source === 'shopping') continue;
-        if (run.products_done >= run.products_total) {
-          await refreshRunStatus(db, run.id);
-          continue;
-        }
+        if (timeLeft() < 3000) break;
         esito[`run_${run.id.slice(0, 8)}`] = await avanzaRunSerp(db, dfs, run, settings, timeLeft);
       }
 
@@ -163,8 +155,8 @@ async function avviaScansioneDelGiorno(
     searchSource: settings.search_source,
   });
 
-  // Google Shopping: accoda finche' c'e' tempo. Il resto lo riprende l'esecuzione
-  // successiva tramite i task in sospeso.
+  // Google Shopping: accoda finche' c'e' tempo. Il resto lo riprende
+  // l'esecuzione successiva tramite i task in sospeso.
   let tasks = 0;
   let offset = 0;
   if (settings.search_source !== 'serp') {
@@ -176,12 +168,13 @@ async function avviaScansioneDelGiorno(
     }
   }
 
-  return { runId, productsTotal, fonte: settings.search_source, accodati: offset, tasks };
+  return { runId, productsTotal, fonte: settings.search_source, accodatiShopping: offset, tasks };
 }
 
 /**
- * Avanza una run SERP di un prodotto alla volta finche' resta tempo.
- * Il cursore e' `products_done`: e' lo stesso che usa la scansione manuale.
+ * Fa avanzare una run SERP: accoda le ricerche che mancano, poi raccoglie
+ * quelle pronte finche' resta tempo. I task SERP sono quelli in
+ * `pt_scan_tasks` con endpoint 'serp'.
  */
 async function avanzaRunSerp(
   db: ReturnType<typeof supabaseAdmin>,
@@ -190,52 +183,38 @@ async function avanzaRunSerp(
   settings: FullScanSettings,
   timeLeft: () => number,
 ): Promise<Record<string, unknown>> {
-  const ai = settings.ai_match_enabled ? await resolveAiCredentials(run.client_id, null) : null;
-  const contesto = await caricaContestoDomini(db, run.client_id);
+  const esito: Record<string, unknown> = {};
 
-  let done = run.products_done;
-  let analizzati = 0;
-  let offerte = 0;
-
-  while (done < run.products_total && timeLeft() > 3500) {
-    const { data } = await db
-      .from('pt_products')
-      .select('id, client_id, sku, gtin, mpn, brand, title, own_price, currency, google_product_id')
-      .eq('client_id', run.client_id)
-      .eq('is_active', true)
-      .order('id', { ascending: true })
-      .range(done, done);
-
-    const product = (data ?? [])[0] as ProductRow | undefined;
-    if (!product) {
-      done = run.products_total; // il catalogo e' finito prima del previsto
-      break;
-    }
-
-    const esclusi = await caricaEsclusiProdotto(db, product.id);
-    const diagnostica = await scansionaProdotto(
-      db,
-      dfs,
-      product,
+  // Accodamento: un lotto per esecuzione basta (50 prodotti ogni 10 minuti).
+  const accodati = await contaProdottiAccodati(db, run.id);
+  if (accodati < run.products_total && timeLeft() > 3000) {
+    const post = await accodaRicerche(db, dfs, {
+      clientId: run.client_id,
+      runId: run.id,
       settings,
-      { ownDomains: contesto.ownDomains, excludedDomains: esclusi },
-      {
-        runId: run.id,
-        cercaAncheEan: settings.search_gtin_pass,
-        deadline: Date.now() + Math.min(timeLeft() - 1500, 6500),
-        ai,
-        pagePrices: settings.serp_page_prices,
-      },
-    );
-
-    done += 1;
-    analizzati += 1;
-    offerte += diagnostica.offerteSalvate;
+      productsTotal: run.products_total,
+      priority: 1,
+    });
+    esito.accodati = `${post.prossimoOffset}/${run.products_total}`;
   }
 
-  await db.from('pt_scan_runs').update({ products_done: done }).eq('id', run.id);
-  await addOffersFound(db, run.id, offerte);
-  await refreshRunStatus(db, run.id);
+  if (timeLeft() < 3500) {
+    await refreshRunStatus(db, run.id);
+    return esito;
+  }
 
-  return { analizzati, offerte, cursore: `${done}/${run.products_total}` };
+  const ai = settings.ai_match_enabled ? await resolveAiCredentials(run.client_id, null) : null;
+  const raccolta = await raccogliRicerche(db, dfs, {
+    clientId: run.client_id,
+    runId: run.id,
+    settings,
+    ai,
+    deadline: Date.now() + timeLeft() - 500,
+  });
+
+  esito.elaborati = raccolta.elaborati;
+  esito.offerte = raccolta.offerte;
+  esito.cursore = `${raccolta.prodottiFatti}/${run.products_total}`;
+  esito.inAttesa = raccolta.inAttesa;
+  return esito;
 }

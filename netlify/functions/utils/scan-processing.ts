@@ -49,7 +49,7 @@ export interface TaskRow {
   run_id: string;
   product_id: string;
   dfs_task_id: string;
-  endpoint: 'products' | 'sellers';
+  endpoint: 'products' | 'sellers' | 'serp';
 }
 
 export interface OfferCandidate {
@@ -273,7 +273,7 @@ async function enqueueSellersTask(
   }
 }
 
-export function buildPostbackUrl(endpoint: 'products' | 'sellers'): string | undefined {
+export function buildPostbackUrl(endpoint: 'products' | 'sellers' | 'serp'): string | undefined {
   const base = process.env.APP_PUBLIC_URL?.replace(/\/$/, '');
   const secret = process.env.DATAFORSEO_POSTBACK_SECRET;
   if (!base || !secret) return undefined; // senza postback si usa il polling

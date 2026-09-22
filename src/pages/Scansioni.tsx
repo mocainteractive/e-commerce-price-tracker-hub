@@ -29,18 +29,27 @@ interface AvvioScansione {
   runId: string;
   productsTotal: number;
   fonte: 'serp' | 'shopping' | 'entrambe';
+  usaSerp: boolean;
+  serpPosted: number;
   serpRemaining: number;
   tasksCreated: number;
   nextOffset: number;
   remaining: number;
-  /** Assente nella ripresa: decide la funzione dalle impostazioni. */
-  cercaAncheEan?: boolean;
 }
 
-interface LottoSerp {
-  analizzati: number;
+interface AccodamentoSerp {
+  accodati: number;
+  taskCreati: number;
+  prossimoOffset: number;
+  remaining: number;
+  closed?: boolean;
+}
+
+interface RaccoltaSerp {
+  elaborati: number;
   offerte: number;
-  nextOffset: number;
+  inAttesa: number;
+  prodottiFatti: number;
   remaining: number;
   closed?: boolean;
   aiAttiva?: boolean;
@@ -79,6 +88,19 @@ const FONTE_LABEL: Record<string, string> = {
 
 /** Tetto sui giri, per non lasciare un ciclo aperto se qualcosa non torna. */
 const MAX_GIRI = 2500;
+/** Attesa fra due raccolte quando non c'e' ancora nulla di pronto. */
+const ATTESA_RISULTATI_MS = 6000;
+/** Oltre questo tempo senza risultati nuovi la raccolta si arrende. */
+const MAX_ATTESA_MS = 20 * 60 * 1000;
+
+/** Pausa a piccoli passi, cosi' Annulla risponde subito. */
+async function attendi(ms: number, ctx: JobContext): Promise<void> {
+  const fine = Date.now() + ms;
+  while (Date.now() < fine) {
+    verificaAnnullamento(ctx);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
 
 export function Scansioni() {
   const { requestContext, canWrite, hasDataForSeo, hasAi } = useMoca();
@@ -88,7 +110,7 @@ export function Scansioni() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const activeRun = data?.runs.find((r) => r.status === 'in_corso');
-  /** Una run SERP interrotta a meta' (browser chiuso) si puo' riprendere dal cursore. */
+  /** Una run SERP interrotta a meta' (browser chiuso) si puo' riprendere: le ricerche sono in coda. */
   const riprendibile =
     activeRun && activeRun.search_source !== 'shopping' && activeRun.products_done < activeRun.products_total;
 
@@ -111,20 +133,20 @@ export function Scansioni() {
   const riprendiScansione = () =>
     run(async (ctx) => {
       if (!activeRun) throw new Error('Nessuna scansione da riprendere');
-      ctx.nota(`Riprendo dal prodotto ${activeRun.products_done + 1} di ${activeRun.products_total}`);
+      ctx.nota(`Riprendo: ${activeRun.products_done} prodotti su ${activeRun.products_total} gia' conclusi`);
       const esito = await cicloSerp(
         {
           runId: activeRun.id,
           productsTotal: activeRun.products_total,
           fonte: activeRun.search_source ?? 'serp',
-          serpRemaining: activeRun.products_total - activeRun.products_done,
+          usaSerp: true,
+          serpPosted: 0,
+          serpRemaining: activeRun.products_total,
           tasksCreated: 0,
           nextOffset: 0,
           remaining: 0,
-          cercaAncheEan: undefined,
         },
         ctx,
-        activeRun.products_done,
       );
       reload();
       return esito;
@@ -140,8 +162,8 @@ export function Scansioni() {
 
       const esiti: string[] = [];
 
-      // --- Ricerca Google: sincrona, i prezzi si salvano subito -------------
-      if (inizio.serpRemaining > 0) {
+      // --- Ricerca Google: in coda su DataForSEO, raccolta a lotti ----------
+      if (inizio.usaSerp) {
         esiti.push(await cicloSerp(inizio, ctx));
       }
 
@@ -154,32 +176,49 @@ export function Scansioni() {
       return esiti.join(' ');
     });
 
-  async function cicloSerp(inizio: AvvioScansione, ctx: JobContext, daOffset = 0): Promise<string> {
-    ctx.fase('Ricerca dei prodotti su Google…');
-    let offset = daOffset;
+  async function cicloSerp(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
+    const total = inizio.productsTotal;
+
+    // --- 1. Accodamento: 50 prodotti per chiamata, idempotente -------------
+    ctx.fase('Accodamento delle ricerche su Google…');
+    let accodati = inizio.serpPosted;
+    ctx.avanzamento(accodati, total);
+
+    for (let giro = 0; giro < MAX_GIRI && accodati < total; giro += 1) {
+      verificaAnnullamento(ctx);
+      const lotto = await apiPost<AccodamentoSerp>(requestContext, 'scan-serp', { runId: inizio.runId, action: 'post' });
+      if (lotto.closed) {
+        ctx.nota('La scansione risulta chiusa: interrompo.');
+        return 'Scansione chiusa.';
+      }
+      accodati = lotto.prossimoOffset;
+      ctx.avanzamento(accodati, total);
+      if (lotto.accodati === 0) break;
+    }
+    ctx.nota(`${accodati} prodotti accodati: i risultati arrivano in uno o due minuti`);
+
+    // --- 2. Raccolta: si elabora quello che e' pronto, si aspetta il resto --
+    ctx.fase('Raccolta dei risultati…');
     let offerte = 0;
-    ctx.avanzamento(offset, inizio.productsTotal);
+    let fatti = 0;
     let senzaRisultati = 0;
     let aiSegnalata = false;
     let errori = 0;
+    let ultimoProgresso = Date.now();
 
-    for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
+    for (let giro = 0; giro < MAX_GIRI; giro += 1) {
       verificaAnnullamento(ctx);
 
-      let lotto: LottoSerp;
+      let lotto: RaccoltaSerp;
       try {
-        lotto = await apiPost<LottoSerp>(requestContext, 'scan-serp', {
-          runId: inizio.runId,
-          offset,
-          cercaAncheEan: inizio.cercaAncheEan,
-        });
+        lotto = await apiPost<RaccoltaSerp>(requestContext, 'scan-serp', { runId: inizio.runId, action: 'collect' });
       } catch (err) {
-        // Un errore su un prodotto non deve fermare tutta la scansione: si
-        // annota e si passa al successivo. Dopo tre di fila ci si ferma.
+        // Un errore di rete o di funzione non deve fermare la raccolta: le
+        // ricerche restano in coda su DataForSEO. Dopo tre di fila ci si ferma.
         errori += 1;
-        ctx.nota(`Prodotto ${offset + 1}: ${(err as Error).message}`);
+        ctx.nota(`Raccolta non riuscita: ${(err as Error).message}`);
         if (errori >= 3) throw new Error(`Tre errori consecutivi: ${(err as Error).message}`);
-        offset += 1;
+        await attendi(ATTESA_RISULTATI_MS, ctx);
         continue;
       }
       errori = 0;
@@ -188,7 +227,6 @@ export function Scansioni() {
         ctx.nota('La scansione risulta chiusa: interrompo.');
         break;
       }
-      if (lotto.analizzati === 0) break;
 
       if (!aiSegnalata) {
         aiSegnalata = true;
@@ -199,9 +237,9 @@ export function Scansioni() {
         );
       }
 
-      offset = lotto.nextOffset;
+      fatti = lotto.prodottiFatti;
       offerte += lotto.offerte;
-      ctx.avanzamento(offset, inizio.productsTotal);
+      ctx.avanzamento(fatti, total);
 
       // Il diario spiega prodotto per prodotto cosa e' successo: e' quello
       // che permette di capire una scansione che non trova nulla.
@@ -221,12 +259,34 @@ export function Scansioni() {
       }
 
       if (lotto.remaining === 0) break;
+
+      if (lotto.elaborati > 0) {
+        ultimoProgresso = Date.now();
+        continue; // c'era roba pronta: si riprova subito
+      }
+
+      if (lotto.inAttesa === 0) {
+        // Nulla in attesa ma prodotti non conclusi: mancano ricerche da accodare
+        // (interruzione precedente). Si riparte dall'accodamento.
+        ctx.nota('Alcune ricerche non risultano accodate: le accodo ora');
+        const post = await apiPost<AccodamentoSerp>(requestContext, 'scan-serp', { runId: inizio.runId, action: 'post' });
+        if (post.accodati === 0) break;
+        continue;
+      }
+
+      if (Date.now() - ultimoProgresso > MAX_ATTESA_MS) {
+        throw new Error(
+          `${lotto.inAttesa} ricerche non sono arrivate da DataForSEO entro 20 minuti: riprendi la scansione piu' tardi con "Riprendi scansione".`,
+        );
+      }
+
+      ctx.nota(`${lotto.inAttesa} ricerche ancora in coda su DataForSEO, attendo qualche secondo`);
+      await attendi(ATTESA_RISULTATI_MS, ctx);
     }
 
-    const analizzati = offset - daOffset;
     return offerte === 0
-      ? `Analizzati ${formatNumber(analizzati)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
-      : `Analizzati ${formatNumber(analizzati)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
+      ? `Conclusi ${formatNumber(fatti)} prodotti su ${formatNumber(total)}, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
+      : `Conclusi ${formatNumber(fatti)} prodotti su ${formatNumber(total)}, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
   }
 
   async function cicloShopping(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
@@ -397,9 +457,11 @@ export function Scansioni() {
         <div className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white p-4 text-sm">
           <Info size={18} className="text-moca-gray shrink-0 mt-0.5" />
           <p className="text-moca-gray">
-            C'e' una scansione aperta, ferma al prodotto {formatNumber(activeRun.products_done)} di{' '}
+            C'e' una scansione aperta con {formatNumber(activeRun.products_done)} prodotti conclusi su{' '}
             {formatNumber(activeRun.products_total)}: succede se la pagina viene chiusa mentre lavora.
-            {riprendibile ? ' Puoi riprenderla da dove si e\' fermata oppure interromperla.' : ' Puoi interromperla.'}
+            {riprendibile
+              ? ' Le ricerche restano in coda su DataForSEO: puoi riprendere la raccolta da dove si e\' fermata oppure interromperla.'
+              : ' Puoi interromperla.'}
           </p>
         </div>
       )}

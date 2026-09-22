@@ -23,7 +23,7 @@ import type { ProductRow } from './utils/scan-processing';
 import { MATCH_AI_LOW, MATCH_HIGH_SCORE, MATCH_MIN_SCORE } from './utils/matching';
 
 /** Un po' piu' largo di scan-serp: qui c'e' una sola ricerca da fare. */
-const BUDGET_MS = 8000;
+const BUDGET_MS = 9000;
 
 interface RequestBody {
   productId: string;

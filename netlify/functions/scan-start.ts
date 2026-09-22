@@ -20,6 +20,7 @@ import { DataForSeoClient } from './utils/dataforseo';
 import { enqueueBatch, PRODUCTS_PER_CALL } from './utils/scan-runner';
 import { loadScanSettings } from './utils/scan-settings';
 import { createRun } from './utils/scan-processing';
+import { accodaRicerche } from './utils/serp-tasks';
 
 interface RequestBody {
   productIds?: string[];
@@ -83,6 +84,20 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   let enqueued = 0;
   let tasksCreated = 0;
   let nextOffset = 0;
+  let serpPosted = 0;
+
+  // Il primo lotto di ricerche SERP parte subito: cosi' i risultati iniziano
+  // ad arrivare mentre il browser accoda il resto.
+  if (usaSerp) {
+    const serp = await accodaRicerche(db, dfs, {
+      clientId: moca.clientId,
+      runId,
+      settings,
+      productsTotal,
+      priority: 2,
+    });
+    serpPosted = serp.prossimoOffset;
+  }
 
   if (usaShopping) {
     const batch = await enqueueBatch(db, dfs, {
@@ -102,8 +117,10 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
       runId,
       productsTotal,
       fonte,
-      // Cursore della parte SERP (sincrona, un prodotto per chiamata).
-      serpRemaining: usaSerp ? productsTotal : 0,
+      // Parte SERP: prodotti gia' accodati e quanti restano da accodare.
+      serpPosted,
+      serpRemaining: usaSerp ? Math.max(productsTotal - serpPosted, 0) : 0,
+      usaSerp,
       // Cursore della parte Google Shopping (asincrona, a lotti).
       enqueued,
       tasksCreated,

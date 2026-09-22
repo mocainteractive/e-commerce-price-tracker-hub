@@ -105,6 +105,12 @@ export interface SerpScanOptions {
   ai?: AiCredentials | null;
   /** Legge il prezzo dalla scheda del venditore quando lo snippet non lo ha. */
   pagePrices?: boolean;
+  /**
+   * Risultati gia' scaricati (ricerche in coda): per ogni tipo di ricerca gli
+   * item della SERP oppure l'errore. Se presente, DataForSEO non viene
+   * interrogato qui: e' il percorso delle scansioni.
+   */
+  risultati?: Partial<Record<'principale' | 'ean', OrganicItem[] | { errore: string }>>;
 }
 
 /** Quante schede di venditori leggere per ricerca. */
@@ -124,14 +130,7 @@ export async function scansionaProdotto(
   contesto: { ownDomains: Set<string>; excludedDomains: Set<string> },
   options: SerpScanOptions = {},
 ): Promise<ProdottoDiagnostica> {
-  const subject: MatchSubject = {
-    title: product.title,
-    brand: product.brand,
-    gtin: product.gtin,
-    mpn: product.mpn,
-    sku: product.sku,
-    price: product.own_price,
-  };
+  const subject = soggettoDi(product);
 
   const diagnostica: ProdottoDiagnostica = {
     productId: product.id,
@@ -145,15 +144,11 @@ export async function scansionaProdotto(
     dominiEsclusi: [...contesto.ownDomains, ...contesto.excludedDomains],
   };
 
-  const ricerche: Array<{ query: string; tipo: 'principale' | 'ean' }> = [];
+  const ricerche = costruisciRicerche(subject, options.cercaAncheEan ?? false);
 
-  const principale = buildSearchQuery(subject);
-  if (principale) ricerche.push({ query: principale, tipo: 'principale' });
-
-  if (options.cercaAncheEan) {
-    const ean = buildGtinQuery(subject);
-    if (ean) ricerche.push({ query: ean, tipo: 'ean' });
-  }
+  // Con i risultati precaricati contano solo le ricerche davvero eseguite.
+  const precaricati = options.risultati;
+  const daValutare = precaricati ? ricerche.filter((r) => precaricati[r.tipo] !== undefined) : ricerche;
 
   if (ricerche.length === 0) {
     diagnostica.query.push({
@@ -165,7 +160,7 @@ export async function scansionaProdotto(
 
   const offerte = new Map<string, OfferCandidate>();
 
-  for (const ricerca of ricerche) {
+  for (const ricerca of daValutare) {
     const esito = await eseguiRicerca(dfs, ricerca, subject, product, settings, contesto, options);
     diagnostica.query.push(esito.diagnostica);
 
@@ -192,6 +187,34 @@ export async function scansionaProdotto(
   }
 
   return diagnostica;
+}
+
+export interface Ricerca {
+  query: string;
+  tipo: 'principale' | 'ean';
+}
+
+/** Le ricerche di un prodotto: principale (marca, codice, titolo) e, a richiesta, EAN. */
+export function costruisciRicerche(subject: MatchSubject, cercaAncheEan: boolean): Ricerca[] {
+  const ricerche: Ricerca[] = [];
+  const principale = buildSearchQuery(subject);
+  if (principale) ricerche.push({ query: principale, tipo: 'principale' });
+  if (cercaAncheEan) {
+    const ean = buildGtinQuery(subject);
+    if (ean) ricerche.push({ query: ean, tipo: 'ean' });
+  }
+  return ricerche;
+}
+
+export function soggettoDi(product: ProductRow): MatchSubject {
+  return {
+    title: product.title,
+    brand: product.brand,
+    gtin: product.gtin,
+    mpn: product.mpn,
+    sku: product.sku,
+    price: product.own_price,
+  };
 }
 
 function queryVuota(query: string, tipo: 'principale' | 'ean'): QueryDiagnostica {
@@ -230,18 +253,28 @@ async function eseguiRicerca(
   const diagnostica = queryVuota(ricerca.query, ricerca.tipo);
   const tempoResiduo = () => (options.deadline ?? Number.POSITIVE_INFINITY) - Date.now();
 
-  // 1. Ricerca. Si lascia almeno un secondo e mezzo per i passaggi successivi.
-  const timeoutRicerca = limita(tempoResiduo() - 1500, 1500, 7000);
+  // 1. Risultati: precaricati dalla coda, oppure ricerca live (diagnostica).
+  let items: OrganicItem[];
+  const precaricato = options.risultati?.[ricerca.tipo];
 
-  let risultato;
-  try {
-    risultato = await dfs.organicLive(ricerca.query, settings.location_code, settings.language_code, 30, timeoutRicerca);
-  } catch (err) {
-    diagnostica.errore = (err as Error).message;
-    return { offerte: [], diagnostica };
+  if (precaricato !== undefined) {
+    if (!Array.isArray(precaricato)) {
+      diagnostica.errore = precaricato.errore;
+      return { offerte: [], diagnostica };
+    }
+    items = precaricato.filter((i) => i.type === 'organic');
+  } else {
+    // Percorso live, usato solo da "Prova la ricerca": alla ricerca va quasi
+    // tutto il tempo, i passaggi successivi si adattano a quel che resta.
+    const timeoutRicerca = limita(tempoResiduo() - 800, 1500, 8000);
+    try {
+      const risultato = await dfs.organicLive(ricerca.query, settings.location_code, settings.language_code, 30, timeoutRicerca);
+      items = (risultato?.items ?? []).filter((i) => i.type === 'organic');
+    } catch (err) {
+      diagnostica.errore = (err as Error).message;
+      return { offerte: [], diagnostica };
+    }
   }
-
-  const items = (risultato?.items ?? []).filter((i) => i.type === 'organic');
   diagnostica.risultatiTotali = items.length;
 
   if (items.length === 0) {

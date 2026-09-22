@@ -245,11 +245,14 @@ export async function collectPendingTasks(
 ): Promise<CollectResult> {
   const maxTasks = Math.min(options.maxTasks ?? TASKS_PER_CALL, TASKS_PER_CALL);
 
+  // Solo i task Google Shopping: quelli SERP hanno la loro raccolta
+  // (utils/serp-tasks.ts) con lettura delle schede e verifica AI.
   let query = db
     .from('pt_scan_tasks')
     .select('id, client_id, run_id, product_id, dfs_task_id, endpoint', { count: 'exact' })
     .eq('client_id', clientId)
     .eq('status', 'in_attesa')
+    .in('endpoint', ['products', 'sellers'])
     .order('created_at', { ascending: true })
     .limit(maxTasks);
 

@@ -118,7 +118,8 @@ l'avanzamento e permettendo di annullare.
 | `catalog-save` | 200 prodotti | browser |
 | `catalog-finalize` | 300 disattivazioni | browser |
 | `extract-pages` | 5 pagine prodotto, in parallelo | browser |
-| `scan-serp` | 1 prodotto, con scadenza a 8,5 s | browser |
+| `scan-serp` (post) | 50 prodotti accodati su DataForSEO | browser |
+| `scan-serp` (collect) | i prodotti pronti, entro 8 s | browser, ogni 6 s |
 | `scan-start` / `scan-enqueue` | 50 prodotti accodati (Shopping) | browser |
 | `scan-collect` | 15 task raccolti | browser |
 | `own-price-refresh` | 8 pagine in parallelo, 6 s ciascuna | browser |
@@ -128,6 +129,15 @@ Ogni chiamata esterna ha un timeout proprio, sotto i 10 secondi: DataForSEO
 (7 s), le schede dei venditori (2,5 s), l'AI (fino a 6 s, con il tempo che
 resta). Senza, una richiesta lenta faceva uccidere la funzione dalla
 piattaforma e il browser riceveva un 502 senza spiegazione.
+
+**Le ricerche SERP sono in coda, non live.** La ricerca live di DataForSEO
+impiega spesso 5-8 secondi: dentro la funzione restavano 4-5 secondi e meta'
+delle ricerche andava in timeout. Con la coda (`task_post`, `tasks_ready`,
+`task_get`) l'accodamento e' immediato, i risultati arrivano in uno o due
+minuti con priorita' alta, restano disponibili 30 giorni e costano meno. Il
+browser prima accoda tutto, poi raccoglie ogni 6 secondi quello che e' pronto
+(`utils/serp-tasks.ts`); la scansione pianificata fa lo stesso a ogni
+esecuzione. La ricerca live resta solo in "Prova la ricerca".
 
 **Dove possibile il lavoro non tocca proprio il server.** CSV e XML vengono
 letti e interpretati nel browser, e per le URL il browser tenta prima il
@@ -177,9 +187,10 @@ modello e nome. L'EAN resta disponibile come **passata aggiuntiva**
 facoltativa: quando un venditore lo pubblica davvero, il riconoscimento e'
 certo.
 
-Per ogni prodotto la scansione fa tre passaggi (`utils/serp-scan.ts`):
+Per ogni prodotto la scansione fa tre passaggi (`utils/serp-scan.ts`), sui
+risultati raccolti dalla coda:
 
-1. **Ricerca e matching deterministico.** Il motore scarta il rumore (0% per
+1. **Matching deterministico.** Il motore scarta il rumore (0% per
    gli articoli estranei) e distingue le varianti dello stesso modello: un
    `6121501C` non viene confuso con un `6121503C`, pur avendo titolo quasi
    identico e prezzo uguale. I codici con spazi ("LIVIA 6608 374") vengono
@@ -212,8 +223,8 @@ riconosciuti.
 
 ### Stato della scansione
 
-Una run si chiude quando non resta lavoro: il cursore SERP ha raggiunto il
-totale e non ci sono task Google Shopping in attesa (`computeRunStatus` in
+Una run si chiude quando non resta lavoro: tutti i prodotti hanno le ricerche
+SERP concluse e non ci sono task (SERP o Google Shopping) in attesa (`computeRunStatus` in
 `utils/scan-processing.ts`, coperta dai test). Una run aperta da oltre due ore
 viene chiusa come parziale. Prima una run SERP non si chiudeva mai, perche' lo
 stato veniva calcolato solo dai task Shopping: il pulsante restava disabilitato
@@ -242,9 +253,10 @@ volte non duplica nulla.
 `scheduled-scan` gira **ogni 10 minuti** con un budget di 8,5 secondi:
 raccoglie i task Shopping in sospeso, alle 06 UTC crea la scansione del giorno
 per i clienti che l'hanno attivata (con la fonte scelta nelle impostazioni),
-poi fa avanzare le scansioni SERP aperte di qualche prodotto alla volta, con
-le stesse regole della scansione manuale. In un giorno ci sono 144 esecuzioni:
-bastano per il tetto predefinito di 200 prodotti.
+poi per le scansioni SERP aperte accoda le ricerche che mancano (50 per
+esecuzione) e raccoglie quelle pronte, con le stesse regole della scansione
+manuale. In un giorno ci sono 144 esecuzioni: bastano per il tetto
+predefinito di 200 prodotti.
 
 ---
 
@@ -262,7 +274,7 @@ netlify/functions/
   dashboard.ts             KPI, serie storica, classifica competitor
   settings.ts              impostazioni + gestione domini competitor
   alerts.ts                elenco avvisi e "segna come letto"
-  scan-serp.ts             ricerca sulla SERP organica, un prodotto per chiamata
+  scan-serp.ts             ricerche SERP: accodamento e raccolta dei risultati
   scan-debug.ts            diagnostica della ricerca su un singolo prodotto
   scan-start.ts            crea la scansione (e accoda Shopping, se scelto)
   scan-enqueue.ts          accoda i lotti Shopping successivi
@@ -283,7 +295,8 @@ netlify/functions/
     pricing.ts             confronto e posizionamento prezzo
     price-queries.ts       letture sullo storico
     remote-fetch.ts        download esterni con budget di tempo e filtro SSRF
-    serp-scan.ts           ricerca, prezzo dalla scheda, AI, diagnostica
+    serp-scan.ts           matching, prezzo dalla scheda, AI, diagnostica
+    serp-tasks.ts          ricerche SERP in coda: accodamento e raccolta
     sitemap-filter.ts      riconoscimento delle pagine prodotto
     scan-runner.ts         accodamento e raccolta Shopping, a lotti
     scan-processing.ts     risultati -> match, storico, avvisi; stato della run
@@ -299,6 +312,7 @@ src/
 supabase/migrations/0001_price_tracker.sql
 supabase/migrations/0002_serp_source_e_sitemap.sql
 supabase/migrations/0003_ai_e_stato_run.sql
+supabase/migrations/0004_serp_in_coda.sql
 tests/unit-checks.ts        logica pura: matching, parser, prezzi
 tests/supabase-client.ts    regressione sul client Supabase senza WebSocket
 tests/serp-matching.ts      matching su feed e risultati di ricerca reali
@@ -317,14 +331,17 @@ Esegui le migration sull'istanza condivisa con l'Hub:
 psql "$DATABASE_URL" -f supabase/migrations/0001_price_tracker.sql
 psql "$DATABASE_URL" -f supabase/migrations/0002_serp_source_e_sitemap.sql
 psql "$DATABASE_URL" -f supabase/migrations/0003_ai_e_stato_run.sql
+psql "$DATABASE_URL" -f supabase/migrations/0004_serp_in_coda.sql
 ```
 
 La prima crea le tabelle con prefisso `pt_`, le policy RLS basate su
 `user_clients` e la funzione di aggregazione `pt_price_index` per la dashboard.
 La seconda aggiunge la scelta della fonte di ricerca e le regole per le
 sitemap. La terza aggiunge le impostazioni per l'AI e per il prezzo dalla
-scheda, la fonte sulla run e il metodo di match `ai`. Senza le ultime due
-l'app funziona comunque, usando i valori di default.
+scheda, la fonte sulla run e il metodo di match `ai`. La quarta ammette i
+task SERP nella tabella dei task: **senza, le scansioni non partono** e
+l'errore dice quale migration eseguire. Senza la seconda e la terza l'app
+funziona comunque, usando i valori di default.
 
 ### 2. Configurazioni del cliente su Moca Hub
 
@@ -424,8 +441,9 @@ run, filtro SSRF, lettura dei verdetti AI.
 
 ## NOTE OPERATIVE
 
-**Costo DataForSEO.** Ogni scansione consuma una richiesta SERP per prodotto
-(due con la passata EAN), piu', con Google Shopping, una per prodotto e una
+**Costo DataForSEO.** Ogni scansione consuma una ricerca SERP in coda per
+prodotto (due con la passata EAN), a priorita' alta per le scansioni manuali
+e normale per quelle pianificate, piu', con Google Shopping, una per prodotto e una
 per ogni prodotto di cui va risolta l'identita'. Il campo *Prodotti per
 scansione* nelle impostazioni e' il tetto di sicurezza.
 

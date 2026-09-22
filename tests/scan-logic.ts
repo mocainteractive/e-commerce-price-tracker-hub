@@ -57,6 +57,20 @@ const shoppingTuttiFalliti = computeRunStatus({
 });
 eq('run Shopping con tutti i task falliti e\' in errore', shoppingTuttiFalliti.status, 'errore');
 
+// --- SERP in coda: la run ha task 'serp'; chiude quando i prodotti sono
+//     tutti conclusi e nessun task e' in attesa.
+const serpInCoda = computeRunStatus({
+  productsTotal: 3, productsDone: 2, searchSource: 'serp', startedAt: avvio, now: adesso,
+  tasks: [{ status: 'completato' }, { status: 'completato' }, { status: 'in_attesa' }],
+});
+eq('run SERP in coda con ricerche in attesa resta in corso', serpInCoda.status, 'in_corso');
+
+const serpInCodaFinita = computeRunStatus({
+  productsTotal: 3, productsDone: 3, searchSource: 'serp', startedAt: avvio, now: adesso,
+  tasks: [{ status: 'completato' }, { status: 'completato' }, { status: 'errore' }],
+});
+eq('run SERP in coda conclusa con una ricerca fallita e\' parziale', serpInCodaFinita.status, 'parziale');
+
 // --- Entrambe: servono sia il cursore SERP sia i task chiusi.
 const entrambeMeta = computeRunStatus({
   productsTotal: 5, productsDone: 5, searchSource: 'entrambe', startedAt: avvio, now: adesso,

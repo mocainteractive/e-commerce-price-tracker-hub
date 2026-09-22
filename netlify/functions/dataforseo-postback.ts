@@ -19,8 +19,11 @@ import { loadDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
 import { addOffersFound, processTask, refreshRunStatus, type TaskRow } from './utils/scan-processing';
 import { loadScanSettings } from './utils/scan-settings';
+import { raccogliRicerche } from './utils/serp-tasks';
+import { resolveAiCredentials } from './utils/client-config';
 
 export const handler: Handler = withHttp(['POST'], async (event, headers) => {
+  const avvio = Date.now();
   if (!isAuthorized(event)) {
     // Nessun dettaglio: non confermiamo neppure l'esistenza dell'endpoint.
     return fail(404, 'Non trovato', headers);
@@ -50,6 +53,21 @@ export const handler: Handler = withHttp(['POST'], async (event, headers) => {
   const settings = await loadScanSettings(db, task.client_id as string);
   const credentials = await loadDataForSeoCredentials(task.client_id as string);
   const dfs = new DataForSeoClient(credentials.login, credentials.password);
+
+  // Ricerca SERP: si raccolgono le ricerche di QUEL prodotto (principale ed
+  // EAN insieme), con lettura delle schede e verifica AI.
+  if (task.endpoint === 'serp') {
+    const ai = settings.ai_match_enabled ? await resolveAiCredentials(task.client_id as string, null) : null;
+    const esito = await raccogliRicerche(db, dfs, {
+      clientId: task.client_id as string,
+      runId: task.run_id as string,
+      settings,
+      ai,
+      deadline: avvio + 8000,
+      productIds: [task.product_id as string],
+    });
+    return json(200, { success: true, offers: esito.offerte, elaborati: esito.elaborati }, headers);
+  }
 
   const offers = await processTask(db, dfs, task as unknown as TaskRow, settings);
 

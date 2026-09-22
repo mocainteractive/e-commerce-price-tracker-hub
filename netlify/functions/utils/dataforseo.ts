@@ -159,6 +159,25 @@ export interface SellersTaskPayload {
   priority?: 1 | 2;
 }
 
+export interface SerpTaskPayload {
+  keyword: string;
+  location_code: number;
+  language_code: string;
+  depth?: number;
+  device?: 'desktop' | 'mobile';
+  os?: string;
+  tag?: string;
+  postback_url?: string;
+  postback_data?: 'advanced' | 'html';
+  /** 1 = coda normale (qualche minuto), 2 = priorita' alta (circa un minuto). */
+  priority?: 1 | 2;
+}
+
+export type SerpTaskOutcome =
+  | { state: 'pronto'; items: OrganicItem[] }
+  | { state: 'in_coda' }
+  | { state: 'errore'; message: string };
+
 export interface TaskHandle {
   /** id DataForSEO, null se la creazione del task e' fallita. */
   id: string | null;
@@ -312,6 +331,49 @@ export class DataForSeoClient {
       timeoutMs,
     );
     return firstResult(res);
+  }
+
+  // --- SERP organico in coda: la modalita' usata dalle scansioni ------------
+
+  /**
+   * Accoda ricerche organiche (task_post). Massimo 100 per chiamata.
+   *
+   * E' la modalita' delle scansioni: la `live` impiega spesso 5-8 secondi e
+   * dentro una Netlify Function da 10 restava troppo poco margine, con meta'
+   * delle ricerche in timeout. In coda la chiamata torna subito, i risultati
+   * arrivano in uno o due minuti (priorita' alta) e costano meno della live.
+   */
+  async postSerpTasks(payloads: SerpTaskPayload[]): Promise<TaskHandle[]> {
+    const res = await this.request<never>(
+      'POST',
+      '/v3/serp/google/organic/task_post',
+      payloads.map((p) => ({ device: 'desktop', os: 'windows', depth: 30, ...p })),
+    );
+    return res.tasks.map(toHandle);
+  }
+
+  async serpTasksReady(): Promise<string[]> {
+    return this.tasksReady('/v3/serp/google/organic/tasks_ready');
+  }
+
+  /**
+   * Scarica il risultato di un task SERP distinguendo i tre esiti: pronto,
+   * ancora in coda (si riprova dopo, senza costo) o fallito per sempre.
+   */
+  async fetchSerpTask(taskId: string): Promise<SerpTaskOutcome> {
+    const res = await this.request<OrganicResult>(
+      'GET',
+      `/v3/serp/google/organic/task_get/advanced/${encodeURIComponent(taskId)}`,
+      undefined,
+      5000,
+    );
+    const task = res.tasks?.[0];
+    if (!task) return { state: 'errore', message: 'Risposta vuota da DataForSEO' };
+    if (task.status_code === STATUS_TASK_IN_QUEUE) return { state: 'in_coda' };
+    if (task.status_code !== STATUS_OK) {
+      return { state: 'errore', message: `${task.status_code} ${task.status_message}` };
+    }
+    return { state: 'pronto', items: task.result?.[0]?.items ?? [] };
   }
 
   // --- comune ---------------------------------------------------------------
