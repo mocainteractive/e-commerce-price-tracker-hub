@@ -14,6 +14,13 @@ import { HttpError } from './http';
 
 const BASE_URL = 'https://api.dataforseo.com';
 
+/**
+ * Tempo massimo per una singola chiamata.
+ * Sotto i ~10 secondi della Netlify Function, con margine per il resto del
+ * lavoro: se sforiamo noi possiamo spiegarlo, se sfora la piattaforma no.
+ */
+const DEFAULT_BUDGET_MS = 7000;
+
 /** Codici di stato DataForSEO rilevanti. */
 const STATUS_OK = 20000;
 const STATUS_TASK_CREATED = 20100;
@@ -178,7 +185,16 @@ export class DataForSeoClient {
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
+    budgetMs = DEFAULT_BUDGET_MS,
   ): Promise<DfsEnvelope<T>> {
+    // Senza un timeout esplicito una chiamata lenta supera i ~10 secondi
+    // della Netlify Function, che viene uccisa dalla piattaforma: al browser
+    // arriva un 502 senza corpo JSON, cioe' un errore senza spiegazione.
+    // Meglio interrompere noi, con un messaggio che dice cosa e' successo.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), budgetMs);
+    const startedAt = Date.now();
+
     let response: Response;
     try {
       response = await fetch(`${BASE_URL}${path}`, {
@@ -188,10 +204,20 @@ export class DataForSeoClient {
           'Content-Type': 'application/json',
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
       });
     } catch (err) {
-      console.error(`[dataforseo] Errore di rete su ${path}:`, err);
+      if ((err as Error).name === 'AbortError') {
+        throw new HttpError(
+          504,
+          `DataForSEO non ha risposto entro ${Math.round(budgetMs / 1000)} secondi.`,
+          'DATAFORSEO_TIMEOUT',
+        );
+      }
+      console.error(`[dataforseo] Errore di rete su ${path} dopo ${Date.now() - startedAt} ms:`, err);
       throw new HttpError(502, 'DataForSEO non raggiungibile');
+    } finally {
+      clearTimeout(timer);
     }
 
     if (response.status === 401) {
@@ -225,7 +251,7 @@ export class DataForSeoClient {
     return res.tasks.map(toHandle);
   }
 
-  async getProductsResult(taskId: string): Promise<ProductsResult | null> {
+  async getProductsResult(taskId: string): Promise<TaskOutcome<ProductsResult>> {
     const res = await this.request<ProductsResult>(
       'GET',
       `/v3/merchant/google/products/task_get/advanced/${encodeURIComponent(taskId)}`,
@@ -245,7 +271,7 @@ export class DataForSeoClient {
     return res.tasks.map(toHandle);
   }
 
-  async getSellersResult(taskId: string): Promise<SellersResult | null> {
+  async getSellersResult(taskId: string): Promise<TaskOutcome<SellersResult>> {
     const res = await this.request<SellersResult>(
       'GET',
       `/v3/merchant/google/sellers/task_get/advanced/${encodeURIComponent(taskId)}`,
@@ -272,19 +298,34 @@ export class DataForSeoClient {
     locationCode: number,
     languageCode: string,
     depth = 30,
+    budgetMs?: number,
   ): Promise<OrganicResult | null> {
-    const res = await this.request<OrganicResult>('POST', '/v3/serp/google/organic/live/advanced', [
-      {
-        keyword,
-        location_code: locationCode,
-        language_code: languageCode,
-        depth,
-        // I risultati e-commerce con prezzo arrivano dalla ricerca desktop.
-        device: 'desktop',
-        os: 'windows',
-      },
-    ]);
-    return firstResult(res);
+    const res = await this.request<OrganicResult>(
+      'POST',
+      '/v3/serp/google/organic/live/advanced',
+      [
+        {
+          keyword,
+          location_code: locationCode,
+          language_code: languageCode,
+          depth,
+          // I risultati e-commerce con prezzo arrivano dalla ricerca desktop.
+          device: 'desktop',
+          os: 'windows',
+        },
+      ],
+      budgetMs,
+    );
+
+    const esito = firstResult(res);
+    if (esito.fallito) {
+      throw new HttpError(
+        502,
+        `DataForSEO non ha potuto completare la ricerca: ${esito.statusMessage} (codice ${esito.statusCode})`,
+        'DATAFORSEO_TASK_FAILED',
+      );
+    }
+    return esito.result;
   }
 
   // --- comune ---------------------------------------------------------------
@@ -314,18 +355,65 @@ function toHandle(task: DfsTask): TaskHandle {
   };
 }
 
-function firstResult<T>(res: DfsEnvelope<T>): T | null {
-  const task = res.tasks?.[0];
-  if (!task) return null;
+/**
+ * Esito di un task, con lo stato riportato da DataForSEO.
+ *
+ * Perche' non basta `T | null`: un task puo' concludersi con un errore
+ * interno del motore di ricerca (status 40101). Restituendo solo `null` quel
+ * caso era indistinguibile da "nessun risultato", e le scansioni risultavano
+ * completate con zero offerte senza che nessuno potesse capire il perche'.
+ */
+export interface TaskOutcome<T> {
+  result: T | null;
+  statusCode: number;
+  statusMessage: string;
+  /** Il task esiste ma non e' ancora pronto: si riprova piu' tardi. */
+  inCoda: boolean;
+  /** Il task si e' concluso con un errore: inutile ritentarlo. */
+  fallito: boolean;
+}
 
-  // Il task esiste ma non e' ancora pronto: non e' un errore, si riprova dopo.
-  if (task.status_code === STATUS_TASK_IN_QUEUE) return null;
+function firstResult<T>(res: DfsEnvelope<T>): TaskOutcome<T> {
+  const task = res.tasks?.[0];
+
+  if (!task) {
+    return {
+      result: null,
+      statusCode: 0,
+      statusMessage: 'Risposta senza task',
+      inCoda: false,
+      fallito: true,
+    };
+  }
+
+  if (task.status_code === STATUS_TASK_IN_QUEUE) {
+    return {
+      result: null,
+      statusCode: task.status_code,
+      statusMessage: task.status_message,
+      inCoda: true,
+      fallito: false,
+    };
+  }
 
   if (task.status_code !== STATUS_OK) {
     console.error(`[dataforseo] task_get: ${task.status_code} ${task.status_message}`);
-    return null;
+    return {
+      result: null,
+      statusCode: task.status_code,
+      statusMessage: task.status_message,
+      inCoda: false,
+      fallito: true,
+    };
   }
-  return task.result?.[0] ?? null;
+
+  return {
+    result: task.result?.[0] ?? null,
+    statusCode: task.status_code,
+    statusMessage: task.status_message,
+    inCoda: false,
+    fallito: false,
+  };
 }
 
 /** Vero quando un task e' fallito in modo definitivo (inutile ritentare). */

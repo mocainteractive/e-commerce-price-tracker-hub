@@ -152,6 +152,19 @@ articoli estranei) e distingue le varianti dello stesso modello: un
 identico e prezzo uguale. `tests/serp-matching.ts` verifica tutto questo sui
 dati veri.
 
+### Tempi: ogni chiamata esterna ha un budget
+
+Niente numeri fissi di elementi per chiamata, ma un **budget di tempo**: una
+ricerca live su DataForSEO puo' durare da uno a sette secondi, quindi un lotto
+fisso o spreca tempo o sfora. Ogni funzione elabora almeno un elemento, poi
+continua solo finche' resta tempo, e dice al browser da dove ripartire.
+
+Anche le chiamate a DataForSEO hanno un timeout esplicito (7 secondi). Senza,
+una chiamata lenta faceva superare il limite alla funzione, che veniva uccisa
+dalla piattaforma: al browser arrivava un 502 con corpo non JSON, cioe'
+"errore imprevisto" senza alcuna spiegazione. Il client riconosce ora anche
+quel caso e lo dice in chiaro.
+
 ### Capire una scansione che non trova nulla
 
 `/api/scan-debug`, esposto nella scheda prodotto come **Prova la ricerca**,
@@ -161,7 +174,14 @@ stato tenuto o scartato.
 
 Esiste perche' "non ha trovato nulla" non e' una diagnosi: con un motore di
 matching servono i numeri, altrimenti si tira a indovinare fra dieci cause
-possibili. Anche il diario della scansione riporta, prodotto per prodotto,
+possibili.
+
+**Gli errori dei task non vengono piu' inghiottiti.** Un task di Google
+Shopping puo' concludersi con un errore interno del motore di ricerca
+(`40101 Internal SE Server Error`): prima veniva registrato come completato
+con zero risultati, e la scansione risultava riuscita senza aver trovato
+niente. Ora il task viene marcato in errore con il messaggio di DataForSEO,
+visibile nella cronologia. Anche il diario della scansione riporta, prodotto per prodotto,
 quanti risultati sono arrivati, quanti avevano un prezzo e quanti sono stati
 riconosciuti.
 

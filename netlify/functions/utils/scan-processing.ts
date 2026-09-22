@@ -123,10 +123,21 @@ export async function processTask(
     await markTask(db, task.id, 'completato');
     return saved;
   } catch (err) {
+    // Non ancora pronto: resta in attesa, si riprovera' alla prossima raccolta.
+    if (err instanceof TaskNonPronto) return 0;
+
     const message = err instanceof Error ? err.message : 'Errore sconosciuto';
     console.error(`[scan] Task ${task.dfs_task_id} fallito:`, message);
     await markTask(db, task.id, 'errore', message);
     return 0;
+  }
+}
+
+/** Il task esiste ma DataForSEO non ha ancora il risultato. */
+export class TaskNonPronto extends Error {
+  constructor() {
+    super('Risultato non ancora pronto');
+    this.name = 'TaskNonPronto';
   }
 }
 
@@ -143,7 +154,18 @@ async function collectFromSellers(
   task: TaskRow,
   product: ProductRow,
 ): Promise<OfferCandidate[]> {
-  const result: SellersResult | null = await dfs.getSellersResult(task.dfs_task_id);
+  const esito = await dfs.getSellersResult(task.dfs_task_id);
+
+  // Un task concluso con errore del motore (es. 40101) non va marcato come
+  // completato con zero risultati: altrimenti la scansione sembra riuscita
+  // mentre non ha trovato niente, ed e' esattamente il caso che rendeva
+  // impossibile capire il problema.
+  if (esito.fallito) {
+    throw new Error(`DataForSEO: ${esito.statusMessage} (codice ${esito.statusCode})`);
+  }
+  if (esito.inCoda) throw new TaskNonPronto();
+
+  const result: SellersResult | null = esito.result;
   if (!result?.items) return [];
 
   const offers: OfferCandidate[] = [];
@@ -167,7 +189,13 @@ async function collectFromProducts(
   product: ProductRow,
   settings: ScanSettings,
 ): Promise<OfferCandidate[]> {
-  const result: ProductsResult | null = await dfs.getProductsResult(task.dfs_task_id);
+  const esito = await dfs.getProductsResult(task.dfs_task_id);
+  if (esito.fallito) {
+    throw new Error(`DataForSEO: ${esito.statusMessage} (codice ${esito.statusCode})`);
+  }
+  if (esito.inCoda) throw new TaskNonPronto();
+
+  const result: ProductsResult | null = esito.result;
   if (!result?.items) return [];
 
   const subject: MatchSubject = {

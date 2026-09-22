@@ -24,8 +24,23 @@ import {
 } from './utils/serp-scan';
 import { refreshRunStatus, addOffersFound, type ProductRow } from './utils/scan-processing';
 
-/** Prodotti per chiamata: ogni ricerca live costa qualche secondo. */
-export const PRODOTTI_PER_CHIAMATA = 3;
+/**
+ * Tetto massimo di prodotti per chiamata.
+ *
+ * Il numero reale lo decide il budget di tempo qui sotto, non questa
+ * costante: una ricerca live su DataForSEO puo' durare da uno a sette
+ * secondi, quindi un numero fisso o spreca tempo o supera il limite della
+ * piattaforma. Con tre ricerche fisse la funzione veniva uccisa da Netlify e
+ * al browser arrivava un 502 senza spiegazione.
+ */
+export const MAX_PRODOTTI_PER_CHIAMATA = 4;
+
+/**
+ * Budget di lavoro, sotto i ~10 secondi della piattaforma.
+ * Almeno un prodotto viene sempre analizzato, altrimenti il ciclo del
+ * browser non avanzerebbe mai.
+ */
+const BUDGET_MS = 6500;
 
 interface RequestBody {
   runId: string;
@@ -40,6 +55,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   const body = parseBody<RequestBody>(event);
   if (!body.runId) throw new HttpError(400, 'Identificativo della scansione mancante');
 
+  const iniziatoAlle = Date.now();
   const db = supabaseAdmin();
   const offset = Math.max(Number(body.offset) || 0, 0);
 
@@ -65,7 +81,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
     .eq('client_id', moca.clientId)
     .eq('is_active', true)
     .order('id', { ascending: true })
-    .range(offset, offset + PRODOTTI_PER_CHIAMATA - 1);
+    .range(offset, offset + MAX_PRODOTTI_PER_CHIAMATA - 1);
 
   if (body.productIds?.length) {
     query = db
@@ -74,7 +90,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
       .eq('client_id', moca.clientId)
       .in('id', body.productIds)
       .order('id', { ascending: true })
-      .range(offset, offset + PRODOTTI_PER_CHIAMATA - 1);
+      .range(offset, offset + MAX_PRODOTTI_PER_CHIAMATA - 1);
   }
 
   const { data: products, error } = await query;
@@ -90,8 +106,12 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   const contesto = await caricaContestoDomini(db, moca.clientId);
   const diagnostiche: ProdottoDiagnostica[] = [];
   let offerte = 0;
+  let analizzati = 0;
 
   for (const product of lotto) {
+    // Il primo prodotto si fa sempre; dagli altri in poi solo se resta tempo.
+    if (analizzati > 0 && Date.now() - iniziatoAlle > BUDGET_MS) break;
+
     const esclusi = await caricaEsclusiProdotto(db, product.id);
 
     const diagnostica = await scansionaProdotto(
@@ -105,9 +125,10 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
 
     diagnostiche.push(diagnostica);
     offerte += diagnostica.offerteSalvate;
+    analizzati += 1;
   }
 
-  const done = offset + lotto.length;
+  const done = offset + analizzati;
 
   await db
     .from('pt_scan_runs')
@@ -121,7 +142,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
 
   return ok(
     {
-      analizzati: lotto.length,
+      analizzati,
       offerte,
       nextOffset: done,
       remaining,

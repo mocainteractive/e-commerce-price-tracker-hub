@@ -32,17 +32,42 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   // Una sola scansione per volta: evita di bruciare credito DataForSEO.
   const { data: running } = await db
     .from('pt_scan_runs')
-    .select('id')
+    .select('id, started_at')
     .eq('client_id', moca.clientId)
     .eq('status', 'in_corso')
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
 
-  if (running && running.length > 0) {
-    throw new HttpError(
-      409,
-      'E\' gia\' in corso una scansione per questo cliente. Attendi che termini oppure raccogline i risultati.',
-      'SCAN_IN_PROGRESS',
-    );
+  if (running) {
+    const eta = Date.now() - new Date(running.started_at as string).getTime();
+
+    const { count: inAttesa } = await db
+      .from('pt_scan_tasks')
+      .select('id', { count: 'exact', head: true })
+      .eq('run_id', running.id)
+      .eq('status', 'in_attesa');
+
+    // Una scansione senza task in volo da oltre dieci minuti e' rimasta
+    // appesa (browser chiuso, errore a meta' strada): chiuderla qui evita
+    // che blocchi per sempre ogni nuova scansione.
+    const appesa = (inAttesa ?? 0) === 0 && eta > 10 * 60 * 1000;
+
+    if (!appesa) {
+      throw new HttpError(
+        409,
+        'E\' gia\' in corso una scansione per questo cliente. Attendi che termini oppure raccogline i risultati.',
+        'SCAN_IN_PROGRESS',
+      );
+    }
+
+    await db
+      .from('pt_scan_runs')
+      .update({
+        status: 'parziale',
+        finished_at: new Date().toISOString(),
+        error_message: 'Interrotta prima del termine',
+      })
+      .eq('id', running.id);
   }
 
   const settings = await loadScanSettings(db, moca.clientId);

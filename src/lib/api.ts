@@ -20,21 +20,51 @@ export class ApiError extends Error {
 }
 
 async function handle<T>(response: Response): Promise<T> {
-  const payload = await response.json().catch(() => ({}));
+  const testo = await response.text();
+
+  let payload: Record<string, unknown> = {};
+  let eraJson = true;
+  try {
+    payload = testo ? (JSON.parse(testo) as Record<string, unknown>) : {};
+  } catch {
+    eraJson = false;
+  }
 
   if (!response.ok || payload.success === false) {
     // Contesto rifiutato: la sessione non e' piu' valida, si ripassa dall'Hub.
     if (response.status === 401) {
       sessionStorage.removeItem('moca_session');
     }
+
     throw new ApiError(
       response.status,
-      payload.error ?? 'Si e\' verificato un errore imprevisto',
-      payload.code,
+      (payload.error as string) ?? descriviErrore(response, testo, eraJson),
+      payload.code as string | undefined,
     );
   }
 
   return payload as T;
+}
+
+/**
+ * Messaggio per le risposte che non sono JSON.
+ *
+ * Succede quando la funzione viene uccisa dalla piattaforma per superamento
+ * del tempo massimo: la risposta e' un 502 con testo semplice, e senza questo
+ * l'utente vedeva solo "errore imprevisto", che non aiuta nessuno.
+ */
+function descriviErrore(response: Response, testo: string, eraJson: boolean): string {
+  if (response.status === 502 || response.status === 504) {
+    return `L'operazione ha superato il tempo massimo consentito dal server (${response.status}). Riprova: il lavoro gia' svolto e' stato salvato.`;
+  }
+  if (response.status === 404) {
+    return 'Funzione non trovata sul server: probabilmente il deploy non e\' aggiornato.';
+  }
+  if (!eraJson && testo) {
+    const estratto = testo.trim().replace(/\s+/g, ' ').slice(0, 160);
+    return `Il server ha risposto ${response.status} con un contenuto inatteso: "${estratto}"`;
+  }
+  return `Il server ha risposto ${response.status} senza dettagli.`;
 }
 
 /**

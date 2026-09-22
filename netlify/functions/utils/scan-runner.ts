@@ -229,8 +229,16 @@ export interface CollectResult {
   stillPending: number;
 }
 
-/** Quanti task elaborare per chiamata: ognuno e' una task_get su DataForSEO. */
+/**
+ * Tetto di task per chiamata. Il numero reale lo decide il budget di tempo:
+ * ogni task e' una `task_get` su DataForSEO e i tempi variano molto. Con un
+ * numero fisso di 15 si sono visti 32 secondi di esecuzione, ben oltre il
+ * limite della piattaforma.
+ */
 export const TASKS_PER_CALL = 15;
+
+/** Budget di lavoro, sotto i ~10 secondi della piattaforma. */
+const COLLECT_BUDGET_MS = 6500;
 
 /**
  * Raccoglie i task pronti. Il chiamante ripete finche' `stillPending` non
@@ -265,12 +273,15 @@ export async function collectPendingTasks(
     ...(await safeReady(() => dfs.productsTasksReady())),
   ]);
 
+  const iniziatoAlle = Date.now();
   let processed = 0;
   let offers = 0;
   // Offerte per run: una raccolta puo' toccare piu' scansioni contemporanee.
   const offersByRun = new Map<string, number>();
 
   for (const task of tasks) {
+    // Il primo task si elabora sempre, poi solo finche' resta tempo.
+    if (processed > 0 && Date.now() - iniziatoAlle > COLLECT_BUDGET_MS) break;
     // Se `tasks_ready` e' vuoto (es. risultati gia' consegnati via postback)
     // proviamo comunque il task_get: e' l'unico modo per chiudere la run.
     if (ready.size > 0 && !ready.has(task.dfs_task_id)) continue;
