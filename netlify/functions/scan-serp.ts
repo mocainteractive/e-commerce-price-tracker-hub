@@ -31,8 +31,12 @@ import { addOffersFound, refreshRunStatus, type ProductRow } from './utils/scan-
 /** Prodotti per chiamata. */
 export const PRODOTTI_PER_CHIAMATA = 1;
 
-/** Entro questo istante dall'avvio la risposta deve partire. */
-const BUDGET_MS = 8500;
+/**
+ * Entro questo istante dall'avvio le fasi di ricerca devono aver finito:
+ * dopo restano il salvataggio delle offerte e l'aggiornamento della run,
+ * che con qualche scrittura su database prendono fino a due secondi.
+ */
+const BUDGET_MS = 7000;
 
 interface RequestBody {
   runId: string;
