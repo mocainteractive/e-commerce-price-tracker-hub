@@ -1,9 +1,14 @@
 /**
  * POST /api/scan-start
  *
- * Avvia una scansione prezzi. Accoda i task su DataForSEO e ritorna subito:
- * i risultati arrivano in modo asincrono (postback o `scan-collect`), perche'
- * gli endpoint Google Shopping non hanno modalita' live.
+ * Crea la scansione e accoda il PRIMO lotto di prodotti su DataForSEO.
+ * Restituisce `remaining`: il browser richiama `scan-enqueue` finche' non
+ * arriva a zero.
+ *
+ * Perche' a lotti: accodare significa una chiamata HTTP a DataForSEO ogni
+ * 100 prodotti, e su un catalogo grande la somma supererebbe i ~10 secondi
+ * delle Netlify Functions. Il browser non ha quel limite, quindi e' lui a
+ * scorrere il catalogo.
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
@@ -11,7 +16,7 @@ import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { resolveDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
-import { startScan } from './utils/scan-runner';
+import { enqueueBatch, PRODUCTS_PER_CALL } from './utils/scan-runner';
 import { loadScanSettings } from './utils/scan-settings';
 
 interface RequestBody {
@@ -27,7 +32,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   // Una sola scansione per volta: evita di bruciare credito DataForSEO.
   const { data: running } = await db
     .from('pt_scan_runs')
-    .select('id, started_at')
+    .select('id')
     .eq('client_id', moca.clientId)
     .eq('status', 'in_corso')
     .limit(1);
@@ -35,7 +40,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   if (running && running.length > 0) {
     throw new HttpError(
       409,
-      'E\' gia\' in corso una scansione per questo cliente. Attendi che termini.',
+      'E\' gia\' in corso una scansione per questo cliente. Attendi che termini oppure raccogline i risultati.',
       'SCAN_IN_PROGRESS',
     );
   }
@@ -44,13 +49,59 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   const credentials = await resolveDataForSeoCredentials(moca.clientId, moca.dataForSeo);
   const dfs = new DataForSeoClient(credentials.login, credentials.password);
 
-  const result = await startScan(db, dfs, {
+  // Quanti prodotti verranno analizzati in totale.
+  const { count: total } = await db
+    .from('pt_products')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_id', moca.clientId)
+    .eq('is_active', true);
+
+  const productsTotal = Math.min(total ?? 0, settings.max_products_per_scan);
+
+  if (productsTotal === 0) {
+    throw new HttpError(
+      400,
+      'Nessun prodotto da analizzare. Importa prima il catalogo dalla sezione Catalogo.',
+      'EMPTY_CATALOG',
+    );
+  }
+
+  const { data: run, error: runError } = await db
+    .from('pt_scan_runs')
+    .insert({
+      client_id: moca.clientId,
+      triggered_by: 'manuale',
+      triggered_by_user: moca.userId || null,
+      products_total: productsTotal,
+      status: 'in_corso',
+    })
+    .select('id')
+    .single();
+
+  if (runError || !run) {
+    console.error('[scan-start] Creazione run fallita:', runError?.message);
+    throw new HttpError(500, `Impossibile avviare la scansione: ${runError?.message ?? 'errore sconosciuto'}`);
+  }
+
+  const runId = run.id as string;
+  const batch = await enqueueBatch(db, dfs, {
     clientId: moca.clientId,
+    runId,
     settings,
     productIds: body.productIds,
-    triggeredBy: 'manuale',
-    triggeredByUser: moca.userId || null,
+    offset: 0,
   });
 
-  return ok({ ...result }, headers);
+  return ok(
+    {
+      runId,
+      productsTotal,
+      enqueued: batch.enqueued,
+      tasksCreated: batch.tasksCreated,
+      nextOffset: batch.nextOffset,
+      remaining: Math.max(productsTotal - batch.nextOffset, 0),
+      batchSize: PRODUCTS_PER_CALL,
+    },
+    headers,
+  );
 });

@@ -17,7 +17,7 @@ import {
   priceProximity,
 } from '../netlify/functions/utils/matching';
 import { parsePrice, extractProductFromHtml } from '../netlify/functions/utils/product-extract';
-import { parseCsv, importFromCsv } from '../netlify/functions/utils/feed';
+import { parseCsv, importFromCsv, parseFeedXml, parseSitemapXml, deriveSku } from '../netlify/functions/utils/feed';
 import { comparePrices } from '../netlify/functions/utils/pricing';
 import { normalizeSupabaseUrl } from '../netlify/functions/utils/supabase-admin';
 
@@ -103,6 +103,56 @@ const best = comparePrices(90, [{ domain: 'a.it', price: 95 }], 2);
 eq('migliore', best.position, 'migliore');
 const allineato = comparePrices(96, [{ domain: 'a.it', price: 95 }], 2);
 eq('allineato', allineato.position, 'allineato');
+
+// --- feed Google Merchant (gli stessi parser girano anche nel browser) ---
+const feedXml = `<?xml version="1.0"?>
+<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel>
+<item><g:id>A1</g:id><title>Frullatore X3</title><link>https://shop.it/p/a1</link>
+<g:price>129.90 EUR</g:price><g:sale_price>119,90 EUR</g:sale_price>
+<g:gtin>4006381333931</g:gtin><g:brand>Acme</g:brand><g:availability>in stock</g:availability>
+<g:image_link>https://shop.it/a1.jpg</g:image_link></item>
+<item><title>Senza prezzo</title><g:id>A2</g:id></item>
+</channel></rss>`;
+
+const feed = parseFeedXml(feedXml);
+eq('feed: prodotti letti', feed.length, 2);
+eq('feed: titolo', feed[0].title, 'Frullatore X3');
+eq('feed: prezzo scontato vince', feed[0].price, 119.9);
+eq('feed: prezzo di listino', feed[0].listPrice, 129.9);
+eq('feed: valuta isolata', feed[0].currency, 'EUR');
+eq('feed: ean validato', feed[0].gtin, '4006381333931');
+eq('feed: disponibilita', feed[0].availability, 'disponibile');
+eq('feed: prezzo mancante resta nullo', feed[1].price, null);
+
+const nonFeed = (() => {
+  try {
+    parseFeedXml('<html><body>Errore 500</body></html>');
+    return 'nessun errore';
+  } catch (err) {
+    return (err as Error).message.slice(0, 20);
+  }
+})();
+eq('feed: documento non valido rifiutato', nonFeed, 'Nessun prodotto trov');
+
+// --- sitemap ---
+const sitemap = parseSitemapXml(
+  '<urlset><url><loc>https://shop.it/p/1</loc></url><url><loc>https://shop.it/p/2</loc></url></urlset>',
+);
+eq('sitemap: url trovate', sitemap.urls.length, 2);
+eq('sitemap: nessun indice', sitemap.nested.length, 0);
+
+const indice = parseSitemapXml(
+  '<sitemapindex><sitemap><loc>https://shop.it/s1.xml</loc></sitemap></sitemapindex>',
+);
+eq('sitemap: indice riconosciuto', indice.nested, ['https://shop.it/s1.xml']);
+
+// --- SKU derivato: deve essere stabile fra browser e server ---
+eq('sku da ean', deriveSku({ ...feed[0], sku: null }), 'ean-4006381333931');
+eq(
+  'sku da titolo',
+  deriveSku({ ...feed[1], sku: null, gtin: null, mpn: null, brand: 'Acme' }),
+  'acme-senza-prezzo',
+);
 
 // --- SUPABASE_URL: la forma sbagliata faceva fallire ogni endpoint con un
 //     "Errore interno del server" senza spiegazione.

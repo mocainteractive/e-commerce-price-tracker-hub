@@ -8,45 +8,59 @@
  * il feed puo' essere rigenerato una volta al giorno, la pagina no.
  */
 import type { Handler } from '@netlify/functions';
-import { HttpError, ok, parseBody } from './utils/http';
+import { ok, parseBody } from './utils/http';
 import { withMoca, requireWriteAccess } from './utils/moca-context';
 import { supabaseAdmin } from './utils/supabase-admin';
 import { extractProductFromUrl } from './utils/product-extract';
 
-/** Quante pagine leggere per chiamata: il timeout della funzione e' 10s. */
-const BATCH_SIZE = 20;
+/**
+ * Quante pagine leggere per chiamata.
+ * Tenuto basso di proposito: ogni pagina e' una richiesta di rete e la
+ * funzione ha ~10 secondi. E' il browser a ripetere la chiamata finche'
+ * `remaining` non arriva a zero, mostrando l'avanzamento.
+ */
+const BATCH_SIZE = 8;
 const CONCURRENCY = 4;
 
 interface RequestBody {
   productIds?: string[];
   limit?: number;
+  /** ISO 8601: istante di avvio del giro, per non ripassare sugli stessi. */
+  staleBefore?: string;
 }
 
 export const handler: Handler = withMoca(['POST'], async (event, moca, headers) => {
   requireWriteAccess(moca);
 
   const body = parseBody<RequestBody>(event);
-  const limit = Math.min(body.limit ?? BATCH_SIZE, 50);
+  const limit = Math.min(body.limit ?? BATCH_SIZE, BATCH_SIZE);
   const db = supabaseAdmin();
 
-  let query = db
-    .from('pt_products')
-    .select('id, product_url, currency, own_price')
-    .eq('client_id', moca.clientId)
-    .eq('is_active', true)
-    .not('product_url', 'is', null)
-    .limit(limit);
+  // `staleBefore` e' l'istante in cui il browser ha avviato il giro: i
+  // prodotti gia' verificati dopo quell'istante sono fatti, e questo rende il
+  // ciclo del browser terminante invece di ripassare sempre sugli stessi.
+  const staleBefore = body.staleBefore ?? new Date().toISOString();
+
+  const selection = () =>
+    db
+      .from('pt_products')
+      .select('id, product_url, currency, own_price', { count: 'exact' })
+      .eq('client_id', moca.clientId)
+      .eq('is_active', true)
+      .not('product_url', 'is', null)
+      .or(`own_price_checked_at.is.null,own_price_checked_at.lt.${staleBefore}`);
+
+  let query = selection().order('own_price_checked_at', { ascending: true, nullsFirst: true }).limit(limit);
 
   if (body.productIds?.length) {
-    query = query.in('id', body.productIds.slice(0, limit));
-  } else {
-    // Senza selezione esplicita partiamo dai prodotti piu' "stantii".
-    query = query.order('own_price_checked_at', { ascending: true, nullsFirst: true });
+    query = selection().in('id', body.productIds.slice(0, limit)).limit(limit);
   }
 
-  const { data: products } = await query;
+  const { data: products, count: pending } = await query;
+
   if (!products || products.length === 0) {
-    throw new HttpError(400, 'Nessun prodotto con URL da aggiornare');
+    // Non e' un errore: puo' voler dire che il giro e' finito.
+    return ok({ checked: 0, updated: 0, unchanged: 0, failed: 0, remaining: 0 }, headers);
   }
 
   const now = new Date().toISOString();
@@ -67,6 +81,13 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
 
       if (!extracted?.price) {
         failed += 1;
+        // Segna comunque il prodotto come verificato, senza toccarne il
+        // prezzo: altrimenti resterebbe "da fare" e il ciclo del browser non
+        // terminerebbe mai. Verra' ritentato al giro successivo.
+        await db
+          .from('pt_products')
+          .update({ own_price_checked_at: now })
+          .eq('id', product.id);
         continue;
       }
 
@@ -107,5 +128,8 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
     if (error) console.warn('[prezzi-propri] Snapshot non salvati:', error.message);
   }
 
-  return ok({ checked: products.length, updated, unchanged, failed }, headers);
+  // `pending` contava le righe da fare PRIMA di questo lotto.
+  const remaining = Math.max((pending ?? products.length) - products.length, 0);
+
+  return ok({ checked: products.length, updated, unchanged, failed, remaining }, headers);
 });

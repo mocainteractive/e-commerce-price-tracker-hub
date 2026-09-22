@@ -1,17 +1,22 @@
 /**
- * Scansioni - avvio manuale, cronologia e raccolta dei risultati.
+ * Scansioni - avvio, raccolta dei risultati e aggiornamento dei prezzi propri.
  *
- * Nota sul flusso: gli endpoint Google Shopping di DataForSEO sono asincroni,
- * quindi "avvia scansione" accoda i task e ritorna subito. I risultati
- * arrivano via postback; il pulsante "Raccogli risultati" forza il recupero
- * quando il postback non e' configurato o non e' arrivato.
+ * Tutte e tre le operazioni sono cicli guidati dal browser: ogni chiamata
+ * alle Netlify Functions lavora su un lotto e dice quanto resta, il browser
+ * ripete finche' non ha finito. Cosi' nessuna singola richiesta si avvicina
+ * ai ~10 secondi della piattaforma, e l'utente vede l'avanzamento.
+ *
+ * Gli endpoint Google Shopping di DataForSEO sono asincroni: "Avvia
+ * scansione" accoda le richieste, i risultati arrivano dopo via postback
+ * oppure con "Raccogli risultati".
  */
-import { useState } from 'react';
 import { AlertTriangle, DownloadCloud, Radar, RefreshCw } from 'lucide-react';
 import { useApiGet } from '../lib/useApi';
-import { apiPost, ApiError } from '../lib/api';
+import { apiPost } from '../lib/api';
 import { useMoca } from '../lib/MocaProvider';
+import { useJob, verificaAnnullamento } from '../lib/useJob';
 import { Badge, Card, EmptyState, ErrorBanner, LoadingBlock } from '../components/ui';
+import { JobProgress } from '../components/JobProgress';
 import { formatDateTime, formatNumber, formatRelative } from '../lib/format';
 import type { ScanRun } from '../lib/types';
 
@@ -33,35 +38,140 @@ const STATUS_LABEL: Record<ScanRun['status'], string> = {
   errore: 'Errore',
 };
 
+/** Tetto sui giri, per non lasciare un ciclo aperto se qualcosa non torna. */
+const MAX_GIRI = 400;
+
 export function Scansioni() {
   const { requestContext, canWrite, hasDataForSeo } = useMoca();
   const { data, loading, error, reload } = useApiGet<RunsResponse>('scan-runs', { limit: 20 });
-
-  const [busy, setBusy] = useState<'start' | 'collect' | 'prices' | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-
-  const run = async (
-    kind: 'start' | 'collect' | 'prices',
-    path: string,
-    body: Record<string, unknown>,
-    describe: (result: Record<string, number>) => string,
-  ) => {
-    setBusy(kind);
-    setActionError(null);
-    setMessage(null);
-    try {
-      const result = await apiPost<Record<string, number>>(requestContext, path, body);
-      setMessage(describe(result));
-      reload();
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Operazione non riuscita');
-    } finally {
-      setBusy(null);
-    }
-  };
+  const { state, run, cancel } = useJob();
 
   const activeRun = data?.runs.find((r) => r.status === 'in_corso');
+
+  // --- Avvio scansione ------------------------------------------------------
+  const avviaScansione = () =>
+    run(async (ctx) => {
+      ctx.fase('Creazione della scansione…');
+
+      const inizio = await apiPost<{
+        runId: string;
+        productsTotal: number;
+        tasksCreated: number;
+        nextOffset: number;
+        remaining: number;
+      }>(requestContext, 'scan-start', {});
+
+      ctx.nota(`Scansione avviata su ${inizio.productsTotal} prodotti`);
+
+      let offset = inizio.nextOffset;
+      let tasks = inizio.tasksCreated;
+      ctx.fase('Accodamento delle richieste su DataForSEO…');
+      ctx.avanzamento(offset, inizio.productsTotal);
+
+      for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
+        verificaAnnullamento(ctx);
+
+        const lotto = await apiPost<{
+          enqueued: number;
+          tasksCreated: number;
+          nextOffset: number;
+          remaining: number;
+          closed?: boolean;
+        }>(requestContext, 'scan-enqueue', { runId: inizio.runId, offset });
+
+        if (lotto.closed || lotto.enqueued === 0) break;
+
+        offset = lotto.nextOffset;
+        tasks += lotto.tasksCreated;
+        ctx.avanzamento(offset, inizio.productsTotal);
+      }
+
+      reload();
+      return `Accodati ${formatNumber(offset)} prodotti (${formatNumber(tasks)} richieste). I risultati arrivano entro pochi minuti: usa "Raccogli risultati" se non compaiono da soli.`;
+    });
+
+  // --- Raccolta risultati ---------------------------------------------------
+  const raccogliRisultati = () =>
+    run(async (ctx) => {
+      ctx.fase('Raccolta dei risultati da DataForSEO…');
+
+      let elaborati = 0;
+      let offerte = 0;
+      let restanti: number | null = null;
+
+      for (let giro = 0; giro < MAX_GIRI; giro += 1) {
+        verificaAnnullamento(ctx);
+
+        const lotto = await apiPost<{ processed: number; offers: number; stillPending: number }>(
+          requestContext,
+          'scan-collect',
+          { runId: activeRun?.id },
+        );
+
+        elaborati += lotto.processed;
+        offerte += lotto.offers;
+
+        if (restanti === null) restanti = lotto.stillPending + lotto.processed;
+        ctx.avanzamento(elaborati, restanti);
+
+        // Nessun progresso: i task restanti non sono ancora pronti.
+        if (lotto.processed === 0) {
+          if (lotto.stillPending > 0) {
+            ctx.nota(
+              `${lotto.stillPending} richieste non sono ancora pronte su DataForSEO: riprova fra qualche minuto.`,
+            );
+          }
+          break;
+        }
+      }
+
+      reload();
+      return elaborati === 0
+        ? 'Nessun risultato pronto al momento.'
+        : `Elaborate ${formatNumber(elaborati)} richieste, ${formatNumber(offerte)} offerte salvate.`;
+    });
+
+  // --- Prezzi dal sito del cliente ------------------------------------------
+  const aggiornaPrezzi = () =>
+    run(async (ctx) => {
+      ctx.fase('Lettura dei prezzi dal tuo sito…');
+
+      const staleBefore = new Date().toISOString();
+      let letti = 0;
+      let aggiornati = 0;
+      let invariati = 0;
+      let falliti = 0;
+      let totale: number | null = null;
+
+      for (let giro = 0; giro < MAX_GIRI; giro += 1) {
+        verificaAnnullamento(ctx);
+
+        const lotto = await apiPost<{
+          checked: number;
+          updated: number;
+          unchanged: number;
+          failed: number;
+          remaining: number;
+        }>(requestContext, 'own-price-refresh', { staleBefore });
+
+        if (lotto.checked === 0) break;
+
+        letti += lotto.checked;
+        aggiornati += lotto.updated;
+        invariati += lotto.unchanged;
+        falliti += lotto.failed;
+
+        if (totale === null) totale = lotto.checked + lotto.remaining;
+        ctx.avanzamento(letti, totale);
+
+        if (lotto.remaining === 0) break;
+      }
+
+      reload();
+      return letti === 0
+        ? 'Nessun prodotto con URL da aggiornare.'
+        : `${formatNumber(letti)} pagine lette: ${formatNumber(aggiornati)} prezzi aggiornati, ${formatNumber(invariati)} invariati, ${formatNumber(falliti)} non leggibili.`;
+    });
 
   return (
     <div className="space-y-6">
@@ -75,43 +185,23 @@ export function Scansioni() {
 
         {canWrite && (
           <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() =>
-                run('prices', 'own-price-refresh', { limit: 20 }, (r) =>
-                  `Prezzi rileggi dal tuo sito: ${formatNumber(r.updated)} aggiornati, ${formatNumber(r.unchanged)} invariati, ${formatNumber(r.failed)} non letti.`,
-                )
-              }
-              disabled={busy !== null}
-              className="moca-btn-secondary"
-            >
-              <RefreshCw size={16} className={busy === 'prices' ? 'animate-spin' : ''} />
+            <button onClick={aggiornaPrezzi} disabled={state.running} className="moca-btn-secondary">
+              <RefreshCw size={16} />
               Aggiorna i tuoi prezzi
             </button>
 
-            <button
-              onClick={() =>
-                run('collect', 'scan-collect', { runId: activeRun?.id }, (r) =>
-                  `Elaborati ${formatNumber(r.processed)} task, ${formatNumber(r.offers)} offerte salvate. In attesa: ${formatNumber(r.stillPending)}.`,
-                )
-              }
-              disabled={busy !== null}
-              className="moca-btn-secondary"
-            >
-              <DownloadCloud size={16} className={busy === 'collect' ? 'animate-spin' : ''} />
+            <button onClick={raccogliRisultati} disabled={state.running} className="moca-btn-secondary">
+              <DownloadCloud size={16} />
               Raccogli risultati
             </button>
 
             <button
-              onClick={() =>
-                run('start', 'scan-start', {}, (r) =>
-                  `Scansione avviata su ${formatNumber(r.productsQueued)} prodotti (${formatNumber(r.tasksCreated)} richieste create). I risultati arrivano entro pochi minuti.`,
-                )
-              }
-              disabled={busy !== null || !!activeRun}
+              onClick={avviaScansione}
+              disabled={state.running || !!activeRun}
               className="moca-btn-primary"
               title={activeRun ? 'Attendi il termine della scansione in corso' : undefined}
             >
-              <Radar size={16} className={busy === 'start' ? 'animate-spin' : ''} />
+              <Radar size={16} />
               Avvia scansione
             </button>
           </div>
@@ -132,10 +222,7 @@ export function Scansioni() {
         </div>
       )}
 
-      {actionError && <ErrorBanner message={actionError} />}
-      {message && (
-        <div className="rounded-xl bg-success/10 p-4 text-sm text-moca-black">{message}</div>
-      )}
+      <JobProgress state={state} onCancel={cancel} />
 
       <Card title="Cronologia">
         {loading && <LoadingBlock />}
