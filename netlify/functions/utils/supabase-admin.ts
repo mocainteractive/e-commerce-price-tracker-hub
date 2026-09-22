@@ -8,6 +8,32 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { HttpError } from './http';
 
+/**
+ * Transport WebSocket fittizio per il client realtime di Supabase.
+ *
+ * Perche' esiste: il costruttore di RealtimeClient risolve SEMPRE un
+ * WebSocket, anche quando il realtime non viene mai usato. Su Node < 22 non
+ * esiste `globalThis.WebSocket`, la risoluzione lancia e `createClient`
+ * fallisce, facendo rispondere 500 a ogni endpoint.
+ *
+ * Queste funzioni usano solo PostgREST (`.from()`, `.rpc()`): nessuna
+ * sottoscrizione realtime, quindi questa classe non viene mai istanziata.
+ * Se un giorno servisse il realtime, il costruttore lo dice a chiare lettere
+ * invece di fallire in modo oscuro.
+ *
+ * L'alternativa sarebbe il pacchetto `ws`, ma e' CommonJS con `require`
+ * dinamici: dentro il bundle ESM delle Netlify Functions si rompe con
+ * "Dynamic require of events is not supported".
+ */
+class RealtimeNonSupportato {
+  constructor() {
+    throw new Error(
+      'Il realtime di Supabase non e\' supportato in queste Netlify Functions. ' +
+        'Per usarlo serve Node 22+ (WebSocket nativo) oppure un transport esplicito.',
+    );
+  }
+}
+
 let cached: SupabaseClient | null = null;
 
 /**
@@ -79,6 +105,8 @@ export function supabaseAdmin(): SupabaseClient {
     cached = createClient(url, serviceKey, {
       auth: { autoRefreshToken: false, persistSession: false },
       global: { headers: { 'X-Client-Info': 'moca-price-tracker' } },
+      // Evita che RealtimeClient cerchi un WebSocket globale: vedi sopra.
+      realtime: { transport: RealtimeNonSupportato as never },
     });
   } catch (err) {
     initError = `${(err as Error).message} (Node ${process.version})`;

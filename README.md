@@ -196,10 +196,21 @@ senza schema veniva rifiutata dal client Supabase e ogni endpoint rispondeva
 con un errore generico: ora lo schema viene aggiunto in automatico e un valore
 davvero malformato produce un messaggio che dice cosa correggere.
 
-**Versione di `@supabase/supabase-js`.** E' vincolata a `>=2.94.0 <2.110.0`
-di proposito: dalla 2.110 la libreria richiede Node 22, mentre le Netlify
-Functions girano su Node 20, e il client non si inizializza piu'. Il sintomo e'
-un 500 su ogni endpoint. Prima di alzare la versione, alza il runtime.
+**Client Supabase e WebSocket.** Il costruttore di `RealtimeClient` risolve
+sempre un WebSocket, anche quando il realtime non si usa. Le Netlify Functions
+girano su Node 20, che non ha `globalThis.WebSocket`: senza accorgimenti
+`createClient` lancia e **ogni** endpoint risponde 500.
+
+`utils/supabase-admin.ts` passa quindi un transport esplicito. Non usa il
+pacchetto `ws` di proposito: e' CommonJS con `require` dinamici e dentro il
+bundle ESM delle functions si rompe con "Dynamic require of events is not
+supported". Al suo posto c'e' una classe che il realtime non istanzia mai, e
+che se venisse istanziata spiega il perche' invece di fallire in modo oscuro.
+Il test `tests/supabase-client.ts` simula un runtime senza WebSocket globale e
+verifica che il client si costruisca comunque.
+
+La versione e' vincolata a `>=2.94.0 <2.110.0` (stessa fascia dell'Hub):
+dalla 2.110 la libreria dichiara `engines: node >= 22`.
 
 **Per verificare la configurazione** apri `/api/health`: elenca quali variabili
 mancano, se le tabelle esistono e se la funzione di aggregazione e'
