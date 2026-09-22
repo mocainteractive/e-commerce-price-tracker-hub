@@ -10,9 +10,10 @@
  * chiamata. Con Google Shopping le richieste vengono accodate e i risultati
  * arrivano dopo, via postback oppure con "Raccogli risultati".
  */
-import { AlertTriangle, DownloadCloud, Info, Radar, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, DownloadCloud, Info, Play, Radar, RefreshCw, Square, Trash2 } from 'lucide-react';
 import { useApiGet } from '../lib/useApi';
-import { apiPost } from '../lib/api';
+import { apiPost, ApiError } from '../lib/api';
 import { useMoca } from '../lib/MocaProvider';
 import { useJob, verificaAnnullamento, type JobContext } from '../lib/useJob';
 import { Badge, Card, EmptyState, ErrorBanner, LoadingBlock } from '../components/ui';
@@ -32,7 +33,8 @@ interface AvvioScansione {
   tasksCreated: number;
   nextOffset: number;
   remaining: number;
-  cercaAncheEan: boolean;
+  /** Assente nella ripresa: decide la funzione dalle impostazioni. */
+  cercaAncheEan?: boolean;
 }
 
 interface LottoSerp {
@@ -82,8 +84,51 @@ export function Scansioni() {
   const { requestContext, canWrite, hasDataForSeo, hasAi } = useMoca();
   const { data, loading, error, reload } = useApiGet<RunsResponse>('scan-runs', { limit: 20 });
   const { state, run, cancel } = useJob();
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const activeRun = data?.runs.find((r) => r.status === 'in_corso');
+  /** Una run SERP interrotta a meta' (browser chiuso) si puo' riprendere dal cursore. */
+  const riprendibile =
+    activeRun && activeRun.search_source !== 'shopping' && activeRun.products_done < activeRun.products_total;
+
+  // --- Azioni sulla cronologia ---------------------------------------------
+  const azione = async (body: Record<string, unknown>, conferma?: string) => {
+    if (conferma && !window.confirm(conferma)) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await apiPost(requestContext, 'scan-runs', body);
+      reload();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Operazione non riuscita');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // --- Ripresa di una scansione rimasta aperta ------------------------------
+  const riprendiScansione = () =>
+    run(async (ctx) => {
+      if (!activeRun) throw new Error('Nessuna scansione da riprendere');
+      ctx.nota(`Riprendo dal prodotto ${activeRun.products_done + 1} di ${activeRun.products_total}`);
+      const esito = await cicloSerp(
+        {
+          runId: activeRun.id,
+          productsTotal: activeRun.products_total,
+          fonte: activeRun.search_source ?? 'serp',
+          serpRemaining: activeRun.products_total - activeRun.products_done,
+          tasksCreated: 0,
+          nextOffset: 0,
+          remaining: 0,
+          cercaAncheEan: undefined,
+        },
+        ctx,
+        activeRun.products_done,
+      );
+      reload();
+      return esito;
+    });
 
   // --- Avvio scansione ------------------------------------------------------
   const avviaScansione = () =>
@@ -109,10 +154,11 @@ export function Scansioni() {
       return esiti.join(' ');
     });
 
-  async function cicloSerp(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
+  async function cicloSerp(inizio: AvvioScansione, ctx: JobContext, daOffset = 0): Promise<string> {
     ctx.fase('Ricerca dei prodotti su Google…');
-    let offset = 0;
+    let offset = daOffset;
     let offerte = 0;
+    ctx.avanzamento(offset, inizio.productsTotal);
     let senzaRisultati = 0;
     let aiSegnalata = false;
     let errori = 0;
@@ -177,9 +223,10 @@ export function Scansioni() {
       if (lotto.remaining === 0) break;
     }
 
+    const analizzati = offset - daOffset;
     return offerte === 0
-      ? `Analizzati ${formatNumber(offset)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
-      : `Analizzati ${formatNumber(offset)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
+      ? `Analizzati ${formatNumber(analizzati)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
+      : `Analizzati ${formatNumber(analizzati)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
   }
 
   async function cicloShopping(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
@@ -314,18 +361,50 @@ export function Scansioni() {
               Raccogli risultati
             </button>
 
-            <button
-              onClick={avviaScansione}
-              disabled={state.running || !!activeRun}
-              className="moca-btn-primary"
-              title={activeRun ? 'Attendi il termine della scansione in corso' : undefined}
-            >
-              <Radar size={16} />
-              Avvia scansione
-            </button>
+            {activeRun ? (
+              <>
+                {riprendibile && (
+                  <button onClick={riprendiScansione} disabled={state.running || busy} className="moca-btn-primary">
+                    <Play size={16} />
+                    Riprendi scansione
+                  </button>
+                )}
+                <button
+                  onClick={() =>
+                    azione(
+                      { action: 'stop', runId: activeRun.id },
+                      'Interrompere la scansione in corso? I prezzi gia\' rilevati restano salvati.',
+                    )
+                  }
+                  disabled={state.running || busy}
+                  className="moca-btn-secondary"
+                >
+                  <Square size={16} />
+                  Interrompi
+                </button>
+              </>
+            ) : (
+              <button onClick={avviaScansione} disabled={state.running} className="moca-btn-primary">
+                <Radar size={16} />
+                Avvia scansione
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {activeRun && !state.running && (
+        <div className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white p-4 text-sm">
+          <Info size={18} className="text-moca-gray shrink-0 mt-0.5" />
+          <p className="text-moca-gray">
+            C'e' una scansione aperta, ferma al prodotto {formatNumber(activeRun.products_done)} di{' '}
+            {formatNumber(activeRun.products_total)}: succede se la pagina viene chiusa mentre lavora.
+            {riprendibile ? ' Puoi riprenderla da dove si e\' fermata oppure interromperla.' : ' Puoi interromperla.'}
+          </p>
+        </div>
+      )}
+
+      {actionError && <ErrorBanner message={actionError} />}
 
       {!hasDataForSeo && (
         <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/10 p-4">
@@ -353,7 +432,26 @@ export function Scansioni() {
 
       <JobProgress state={state} onCancel={cancel} />
 
-      <Card title="Cronologia">
+      <Card
+        title="Cronologia"
+        action={
+          canWrite && data && data.runs.some((r) => r.status !== 'in_corso') ? (
+            <button
+              onClick={() =>
+                azione(
+                  { action: 'clear' },
+                  'Svuotare la cronologia delle scansioni concluse? I prezzi rilevati e i venditori restano.',
+                )
+              }
+              disabled={busy || state.running}
+              className="moca-btn-secondary text-sm"
+            >
+              <Trash2 size={14} />
+              Svuota cronologia
+            </button>
+          ) : undefined
+        }
+      >
         {loading && <LoadingBlock />}
         {error && <ErrorBanner message={error} onRetry={reload} />}
 
@@ -375,7 +473,8 @@ export function Scansioni() {
                   <th className="py-3 pr-4 font-semibold text-right">Prodotti</th>
                   <th className="py-3 pr-4 font-semibold text-right">Offerte trovate</th>
                   <th className="py-3 pr-4 font-semibold text-right">In attesa</th>
-                  <th className="py-3 font-semibold">Stato</th>
+                  <th className="py-3 pr-4 font-semibold">Stato</th>
+                  {canWrite && <th className="py-3 font-semibold text-right">Azioni</th>}
                 </tr>
               </thead>
               <tbody>
@@ -404,12 +503,40 @@ export function Scansioni() {
                     <td className="py-3 pr-4 text-right tabular-nums text-moca-gray">
                       {formatNumber(scanRun.pendingTasks ?? 0)}
                     </td>
-                    <td className="py-3">
+                    <td className="py-3 pr-4">
                       <Badge tone={STATUS_TONE[scanRun.status]}>{STATUS_LABEL[scanRun.status]}</Badge>
                       {scanRun.error_message && (
                         <p className="mt-1 text-xs text-moca-gray">{scanRun.error_message}</p>
                       )}
                     </td>
+                    {canWrite && (
+                      <td className="py-3 text-right">
+                        {scanRun.status === 'in_corso' ? (
+                          <button
+                            onClick={() =>
+                              azione(
+                                { action: 'stop', runId: scanRun.id },
+                                'Interrompere la scansione in corso? I prezzi gia\' rilevati restano salvati.',
+                              )
+                            }
+                            disabled={busy || state.running}
+                            className="moca-btn-secondary !px-3 !py-1.5"
+                            title="Interrompi"
+                          >
+                            <Square size={14} />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => azione({ action: 'delete', runId: scanRun.id })}
+                            disabled={busy || state.running}
+                            className="moca-btn-secondary !px-3 !py-1.5"
+                            title="Elimina dalla cronologia"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

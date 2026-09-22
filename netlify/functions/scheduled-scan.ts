@@ -222,7 +222,7 @@ async function avanzaRunSerp(
       {
         runId: run.id,
         cercaAncheEan: settings.search_gtin_pass,
-        deadline: Date.now() + Math.min(timeLeft() - 500, 8000),
+        deadline: Date.now() + Math.min(timeLeft() - 1500, 6500),
         ai,
         pagePrices: settings.serp_page_prices,
       },
