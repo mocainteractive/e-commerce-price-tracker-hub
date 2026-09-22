@@ -11,6 +11,18 @@ import { HttpError } from './http';
 let cached: SupabaseClient | null = null;
 
 /**
+ * Ultimo errore di inizializzazione, in chiaro.
+ * Lo espone solo `/api/health`: agli endpoint normali va un messaggio generico,
+ * ma senza il testo originale un problema come "supabase-js richiede Node 22"
+ * resta invisibile e si finisce a indovinare.
+ */
+let initError: string | null = null;
+
+export function getSupabaseInitError(): string | null {
+  return initError;
+}
+
+/**
  * Normalizza il valore di SUPABASE_URL.
  *
  * Incollando la URL dalla dashboard di Supabase e' facile perdere lo schema
@@ -69,7 +81,8 @@ export function supabaseAdmin(): SupabaseClient {
       global: { headers: { 'X-Client-Info': 'moca-price-tracker' } },
     });
   } catch (err) {
-    console.error('[supabase] createClient fallito:', (err as Error).message);
+    initError = `${(err as Error).message} (Node ${process.version})`;
+    console.error('[supabase] createClient fallito:', initError);
     throw new HttpError(
       500,
       'Database non configurato: impossibile inizializzare il client Supabase.',
@@ -77,10 +90,12 @@ export function supabaseAdmin(): SupabaseClient {
     );
   }
 
+  initError = null;
   return cached;
 }
 
-/** Azzera la cache. Usato solo dai test. */
+/** Azzera cache ed errore. Usato solo dai test. */
 export function resetSupabaseAdmin(): void {
   cached = null;
+  initError = null;
 }

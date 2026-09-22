@@ -31,6 +31,8 @@ const ETICHETTE: Record<string, string> = {
   tabella_pt_price_snapshots: 'Tabella storico prezzi',
   tabella_configurations: 'Configurazioni cliente (Hub)',
   funzione_pt_price_index: 'Funzione indice prezzi',
+  client_supabase: 'Client Supabase',
+  runtime_node: 'Runtime Node',
 };
 
 export function StatoConfigurazione({ sempreVisibile = false }: { sempreVisibile?: boolean }) {
