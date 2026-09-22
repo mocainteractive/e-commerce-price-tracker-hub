@@ -126,7 +126,13 @@ export interface MatchCandidate {
   price?: number | null;
 }
 
-export type MatchMethod = 'gtin' | 'mpn' | 'google_shopping' | 'serp' | 'manual';
+export type MatchMethod = 'gtin' | 'mpn' | 'google_shopping' | 'serp' | 'ai' | 'manual';
+
+/**
+ * Fascia dei candidati incerti: sotto la soglia di scarto sicuro e sotto
+ * quella di accettazione sicura. E' qui che una verifica AI cambia l'esito.
+ */
+export const MATCH_AI_LOW = 0.4;
 
 export interface MatchVerdict {
   score: number;
@@ -168,10 +174,19 @@ export function scoreMatch(
   // 2. MPN / SKU: codice produttore nel titolo del candidato.
   const codes = [subject.mpn, subject.sku]
     .filter((c): c is string => Boolean(c && c.length >= 4))
-    .map((c) => normalizeText(c).replace(/\s+/g, ''));
+    .map((c) => normalizeText(c).replace(/\s+/g, ''))
+    .filter((c) => /\d/.test(c));
 
   const candidateCodes = extractCodeTokens(haystack).map((t) => t.replace(/\s+/g, ''));
-  const codeHit = codes.find((code) => candidateCodes.some((c) => c === code || c.includes(code)));
+  // I codici con spazi ("LIVIA 6608 374") non sono un solo token: si cercano
+  // anche nel testo compattato, ma solo se abbastanza lunghi da non
+  // combaciare per caso.
+  const compactHaystack = haystack.replace(/\s+/g, '');
+  const codeHit = codes.find(
+    (code) =>
+      candidateCodes.some((c) => c === code || c.includes(code)) ||
+      (code.length >= 7 && compactHaystack.includes(code)),
+  );
 
   if (codeHit) {
     const proximity = priceProximity(subject.price ?? null, candidate.price ?? null);

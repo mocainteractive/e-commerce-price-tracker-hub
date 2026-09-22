@@ -25,6 +25,8 @@ interface SettingsPayload {
   max_products_per_scan?: number;
   search_source?: 'serp' | 'shopping' | 'entrambe';
   search_gtin_pass?: boolean;
+  ai_match_enabled?: boolean;
+  serp_page_prices?: boolean;
 }
 
 interface RequestBody {
@@ -99,6 +101,8 @@ async function updateSettings(clientId: string, payload: SettingsPayload): Promi
   if (payload.auto_scan_enabled !== undefined) patch.auto_scan_enabled = payload.auto_scan_enabled;
   if (payload.search_source !== undefined) patch.search_source = payload.search_source;
   if (payload.search_gtin_pass !== undefined) patch.search_gtin_pass = payload.search_gtin_pass;
+  if (payload.ai_match_enabled !== undefined) patch.ai_match_enabled = payload.ai_match_enabled;
+  if (payload.serp_page_prices !== undefined) patch.serp_page_prices = payload.serp_page_prices;
 
   if (payload.undercut_threshold !== undefined) {
     patch.undercut_threshold = clamp(payload.undercut_threshold, 0, 100, 'Soglia sottoprezzo');
@@ -113,6 +117,15 @@ async function updateSettings(clientId: string, payload: SettingsPayload): Promi
   const { error } = await db.from('pt_settings').upsert(patch, { onConflict: 'client_id' });
   if (error) {
     console.error('[settings] Upsert fallito:', error.message);
+    // Colonna assente: la migration corrispondente non e' stata eseguita.
+    const colonna = error.message.match(/column "?([a-z_]+)"? /i)?.[1];
+    if (/column/i.test(error.message) && colonna) {
+      throw new HttpError(
+        500,
+        `Salvataggio non riuscito: la colonna ${colonna} non esiste. Esegui le migration in supabase/migrations (0002 e 0003).`,
+        'MIGRATION_MISSING',
+      );
+    }
     throw new HttpError(500, 'Salvataggio delle impostazioni non riuscito');
   }
 }
@@ -156,5 +169,7 @@ function defaultSettings(clientId: string) {
     max_products_per_scan: 200,
     search_source: 'serp',
     search_gtin_pass: false,
+    ai_match_enabled: true,
+    serp_page_prices: true,
   };
 }

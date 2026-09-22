@@ -6,15 +6,15 @@
  * ripete finche' non ha finito. Cosi' nessuna singola richiesta si avvicina
  * ai ~10 secondi della piattaforma, e l'utente vede l'avanzamento.
  *
- * Gli endpoint Google Shopping di DataForSEO sono asincroni: "Avvia
- * scansione" accoda le richieste, i risultati arrivano dopo via postback
- * oppure con "Raccogli risultati".
+ * Con la ricerca Google (SERP) i prezzi si salvano subito, un prodotto per
+ * chiamata. Con Google Shopping le richieste vengono accodate e i risultati
+ * arrivano dopo, via postback oppure con "Raccogli risultati".
  */
-import { AlertTriangle, DownloadCloud, Radar, RefreshCw } from 'lucide-react';
+import { AlertTriangle, DownloadCloud, Info, Radar, RefreshCw } from 'lucide-react';
 import { useApiGet } from '../lib/useApi';
 import { apiPost } from '../lib/api';
 import { useMoca } from '../lib/MocaProvider';
-import { useJob, verificaAnnullamento } from '../lib/useJob';
+import { useJob, verificaAnnullamento, type JobContext } from '../lib/useJob';
 import { Badge, Card, EmptyState, ErrorBanner, LoadingBlock } from '../components/ui';
 import { JobProgress } from '../components/JobProgress';
 import { formatDateTime, formatNumber, formatRelative } from '../lib/format';
@@ -22,6 +22,37 @@ import type { ScanRun } from '../lib/types';
 
 interface RunsResponse {
   runs: ScanRun[];
+}
+
+interface AvvioScansione {
+  runId: string;
+  productsTotal: number;
+  fonte: 'serp' | 'shopping' | 'entrambe';
+  serpRemaining: number;
+  tasksCreated: number;
+  nextOffset: number;
+  remaining: number;
+  cercaAncheEan: boolean;
+}
+
+interface LottoSerp {
+  analizzati: number;
+  offerte: number;
+  nextOffset: number;
+  remaining: number;
+  closed?: boolean;
+  aiAttiva?: boolean;
+  diagnostiche: Array<{
+    titolo: string;
+    query: string[];
+    risultati: number;
+    conPrezzo: number;
+    accettati: number;
+    prezziDaPagina: number;
+    aiVerificati: number;
+    offerteSalvate: number;
+    errore: string | null;
+  }>;
 }
 
 const STATUS_TONE: Record<ScanRun['status'], 'neutro' | 'positivo' | 'attenzione' | 'critico' | 'info'> = {
@@ -38,11 +69,17 @@ const STATUS_LABEL: Record<ScanRun['status'], string> = {
   errore: 'Errore',
 };
 
+const FONTE_LABEL: Record<string, string> = {
+  serp: 'Ricerca Google',
+  shopping: 'Google Shopping',
+  entrambe: 'Google e Shopping',
+};
+
 /** Tetto sui giri, per non lasciare un ciclo aperto se qualcosa non torna. */
-const MAX_GIRI = 400;
+const MAX_GIRI = 2500;
 
 export function Scansioni() {
-  const { requestContext, canWrite, hasDataForSeo } = useMoca();
+  const { requestContext, canWrite, hasDataForSeo, hasAi } = useMoca();
   const { data, loading, error, reload } = useApiGet<RunsResponse>('scan-runs', { limit: 20 });
   const { state, run, cancel } = useJob();
 
@@ -53,106 +90,129 @@ export function Scansioni() {
     run(async (ctx) => {
       ctx.fase('Creazione della scansione…');
 
-      const inizio = await apiPost<{
-        runId: string;
-        productsTotal: number;
-        fonte: 'serp' | 'shopping' | 'entrambe';
-        tasksCreated: number;
-        nextOffset: number;
-        remaining: number;
-        cercaAncheEan: boolean;
-      }>(requestContext, 'scan-start', {});
+      const inizio = await apiPost<AvvioScansione>(requestContext, 'scan-start', {});
+      ctx.nota(`Scansione avviata su ${inizio.productsTotal} prodotti (${FONTE_LABEL[inizio.fonte] ?? inizio.fonte})`);
 
-      ctx.nota(`Scansione avviata su ${inizio.productsTotal} prodotti`);
+      const esiti: string[] = [];
 
-      // --- SERP organica: sincrona, i prezzi si salvano subito -------------
-      if (inizio.fonte === 'serp') {
-        ctx.fase('Ricerca dei prodotti su Google…');
-        let offset = 0;
-        let offerte = 0;
-        let senzaRisultati = 0;
-
-        for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
-          verificaAnnullamento(ctx);
-
-          const lotto = await apiPost<{
-            analizzati: number;
-            offerte: number;
-            nextOffset: number;
-            remaining: number;
-            diagnostiche: Array<{
-              titolo: string;
-              query: string[];
-              risultati: number;
-              conPrezzo: number;
-              accettati: number;
-              offerteSalvate: number;
-              errore: string | null;
-            }>;
-          }>(requestContext, 'scan-serp', {
-            runId: inizio.runId,
-            offset,
-            cercaAncheEan: inizio.cercaAncheEan,
-          });
-
-          if (lotto.analizzati === 0) break;
-
-          offset = lotto.nextOffset;
-          offerte += lotto.offerte;
-          ctx.avanzamento(offset, inizio.productsTotal);
-
-          // Il diario spiega prodotto per prodotto cosa e' successo: e' quello
-          // che permette di capire una scansione che non trova nulla.
-          for (const d of lotto.diagnostiche) {
-            if (d.offerteSalvate === 0) senzaRisultati += 1;
-            ctx.nota(
-              d.errore
-                ? `${d.titolo}: ${d.errore}`
-                : `${d.titolo}: ${d.risultati} risultati, ${d.conPrezzo} con prezzo, ${d.accettati} riconosciuti, ${d.offerteSalvate} salvati`,
-            );
-          }
-
-          if (lotto.remaining === 0) break;
-        }
-
-        reload();
-        return offerte === 0
-          ? `Analizzati ${formatNumber(offset)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
-          : `Analizzati ${formatNumber(offset)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
+      // --- Ricerca Google: sincrona, i prezzi si salvano subito -------------
+      if (inizio.serpRemaining > 0) {
+        esiti.push(await cicloSerp(inizio, ctx));
       }
 
       // --- Google Shopping: asincrono, si accodano i task ------------------
-      let offset = inizio.nextOffset;
-      let tasks = inizio.tasksCreated;
-      ctx.fase('Accodamento delle richieste su DataForSEO…');
-      ctx.avanzamento(offset, inizio.productsTotal);
-
-      for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
-        verificaAnnullamento(ctx);
-
-        const lotto = await apiPost<{
-          enqueued: number;
-          tasksCreated: number;
-          nextOffset: number;
-          remaining: number;
-          closed?: boolean;
-        }>(requestContext, 'scan-enqueue', { runId: inizio.runId, offset });
-
-        if (lotto.closed || lotto.enqueued === 0) break;
-
-        offset = lotto.nextOffset;
-        tasks += lotto.tasksCreated;
-        ctx.avanzamento(offset, inizio.productsTotal);
+      if (inizio.fonte === 'shopping' || inizio.fonte === 'entrambe') {
+        esiti.push(await cicloShopping(inizio, ctx));
       }
 
       reload();
-      return `Accodati ${formatNumber(offset)} prodotti (${formatNumber(tasks)} richieste). I risultati arrivano entro pochi minuti: usa "Raccogli risultati" se non compaiono da soli.`;
+      return esiti.join(' ');
     });
+
+  async function cicloSerp(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
+    ctx.fase('Ricerca dei prodotti su Google…');
+    let offset = 0;
+    let offerte = 0;
+    let senzaRisultati = 0;
+    let aiSegnalata = false;
+    let errori = 0;
+
+    for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
+      verificaAnnullamento(ctx);
+
+      let lotto: LottoSerp;
+      try {
+        lotto = await apiPost<LottoSerp>(requestContext, 'scan-serp', {
+          runId: inizio.runId,
+          offset,
+          cercaAncheEan: inizio.cercaAncheEan,
+        });
+      } catch (err) {
+        // Un errore su un prodotto non deve fermare tutta la scansione: si
+        // annota e si passa al successivo. Dopo tre di fila ci si ferma.
+        errori += 1;
+        ctx.nota(`Prodotto ${offset + 1}: ${(err as Error).message}`);
+        if (errori >= 3) throw new Error(`Tre errori consecutivi: ${(err as Error).message}`);
+        offset += 1;
+        continue;
+      }
+      errori = 0;
+
+      if (lotto.closed) {
+        ctx.nota('La scansione risulta chiusa: interrompo.');
+        break;
+      }
+      if (lotto.analizzati === 0) break;
+
+      if (!aiSegnalata) {
+        aiSegnalata = true;
+        ctx.nota(
+          lotto.aiAttiva
+            ? 'Verifica AI dei match incerti attiva'
+            : 'Verifica AI non attiva: manca ANTHROPIC_API_KEY fra le configurazioni del cliente sull\'Hub',
+        );
+      }
+
+      offset = lotto.nextOffset;
+      offerte += lotto.offerte;
+      ctx.avanzamento(offset, inizio.productsTotal);
+
+      // Il diario spiega prodotto per prodotto cosa e' successo: e' quello
+      // che permette di capire una scansione che non trova nulla.
+      for (const d of lotto.diagnostiche) {
+        if (d.offerteSalvate === 0) senzaRisultati += 1;
+        const extra = [
+          d.prezziDaPagina > 0 ? `${d.prezziDaPagina} prezzi dalla scheda` : null,
+          d.aiVerificati > 0 ? `${d.aiVerificati} verificati dall'AI` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        ctx.nota(
+          d.errore
+            ? `${d.titolo}: ${d.errore}`
+            : `${d.titolo}: ${d.risultati} risultati, ${d.conPrezzo} con prezzo, ${d.accettati} riconosciuti, ${d.offerteSalvate} salvati${extra ? ` (${extra})` : ''}`,
+        );
+      }
+
+      if (lotto.remaining === 0) break;
+    }
+
+    return offerte === 0
+      ? `Analizzati ${formatNumber(offset)} prodotti, nessuna offerta trovata. Apri un prodotto e usa "Prova la ricerca" per vedere cosa torna da Google.`
+      : `Analizzati ${formatNumber(offset)} prodotti, ${formatNumber(offerte)} offerte salvate${senzaRisultati > 0 ? ` (${formatNumber(senzaRisultati)} senza riscontri)` : ''}.`;
+  }
+
+  async function cicloShopping(inizio: AvvioScansione, ctx: JobContext): Promise<string> {
+    let offset = inizio.nextOffset;
+    let tasks = inizio.tasksCreated;
+    ctx.fase('Accodamento delle richieste su Google Shopping…');
+    ctx.avanzamento(offset, inizio.productsTotal);
+
+    for (let giro = 0; giro < MAX_GIRI && offset < inizio.productsTotal; giro += 1) {
+      verificaAnnullamento(ctx);
+
+      const lotto = await apiPost<{
+        enqueued: number;
+        tasksCreated: number;
+        nextOffset: number;
+        remaining: number;
+        closed?: boolean;
+      }>(requestContext, 'scan-enqueue', { runId: inizio.runId, offset });
+
+      if (lotto.closed || lotto.enqueued === 0) break;
+
+      offset = lotto.nextOffset;
+      tasks += lotto.tasksCreated;
+      ctx.avanzamento(offset, inizio.productsTotal);
+    }
+
+    return `Accodati ${formatNumber(offset)} prodotti su Google Shopping (${formatNumber(tasks)} richieste): i risultati arrivano entro pochi minuti, usa "Raccogli risultati" se non compaiono da soli.`;
+  }
 
   // --- Raccolta risultati ---------------------------------------------------
   const raccogliRisultati = () =>
     run(async (ctx) => {
-      ctx.fase('Raccolta dei risultati da DataForSEO…');
+      ctx.fase('Raccolta dei risultati da Google Shopping…');
 
       let elaborati = 0;
       let offerte = 0;
@@ -238,7 +298,7 @@ export function Scansioni() {
         <div>
           <h2 className="text-2xl font-semibold text-moca-black">Scansioni</h2>
           <p className="text-sm text-moca-gray">
-            Ricerca dei tuoi prodotti su Google Shopping e rilevazione dei prezzi dei venditori.
+            Ricerca dei tuoi prodotti su Google e rilevazione dei prezzi dei venditori.
           </p>
         </div>
 
@@ -281,6 +341,16 @@ export function Scansioni() {
         </div>
       )}
 
+      {hasDataForSeo && !hasAi && (
+        <div className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white p-4 text-sm">
+          <Info size={18} className="text-moca-gray shrink-0 mt-0.5" />
+          <p className="text-moca-gray">
+            Verifica AI dei match non attiva: aggiungi <code>ANTHROPIC_API_KEY</code> fra le
+            configurazioni del cliente su Moca Hub per far valutare a Claude i risultati incerti.
+          </p>
+        </div>
+      )}
+
       <JobProgress state={state} onCancel={cancel} />
 
       <Card title="Cronologia">
@@ -320,7 +390,10 @@ export function Scansioni() {
                       </div>
                     </td>
                     <td className="py-3 pr-4 text-moca-gray">
-                      {scanRun.triggered_by === 'manuale' ? 'Manuale' : 'Pianificata'}
+                      <div>{scanRun.triggered_by === 'manuale' ? 'Manuale' : 'Pianificata'}</div>
+                      {scanRun.search_source && (
+                        <div className="text-xs">{FONTE_LABEL[scanRun.search_source] ?? scanRun.search_source}</div>
+                      )}
                     </td>
                     <td className="py-3 pr-4 text-right tabular-nums">
                       {formatNumber(scanRun.products_done)} / {formatNumber(scanRun.products_total)}

@@ -17,9 +17,12 @@
   # Le utility condivise non sono endpoint: restano fuori dal deploy come funzioni.
   included_files = ["netlify/functions/utils/**"]
 
-# Scansione automatica giornaliera (06:00 UTC) per i clienti che l'hanno attivata.
+# Scansione automatica: ogni 10 minuti la funzione fa un pezzo di lavoro
+# (crea le run del giorno alle 06 UTC, poi avanza le scansioni aperte di
+# qualche prodotto per volta). Una sola esecuzione al giorno non basterebbe:
+# ha ~10 secondi e una ricerca SERP ne richiede qualcuno.
 [functions."scheduled-scan"]
-  schedule = "0 6 * * *"
+  schedule = "*/10 * * * *"
 
 # Alias comodo: /api/* -> funzioni Netlify dell'app.
 [[redirects]]

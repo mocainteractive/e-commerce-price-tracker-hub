@@ -4,10 +4,15 @@
  * Chiude un import "sostitutivo": disattiva i prodotti che l'import appena
  * concluso non ha toccato.
  *
- * Il criterio e' il timestamp: il browser manda l'istante in cui ha iniziato
- * l'import, e tutto cio' che non e' stato aggiornato da allora non era nella
- * sorgente. Cosi' non serve spedire l'elenco completo degli SKU, che con
- * qualche migliaio di prodotti non starebbe in una richiesta.
+ * Il criterio e' il timestamp: tutto cio' che non e' stato aggiornato da
+ * quando l'import e' iniziato non era nella sorgente. Cosi' non serve spedire
+ * l'elenco completo degli SKU, che con qualche migliaio di prodotti non
+ * starebbe in una richiesta.
+ *
+ * L'istante di inizio lo fornisce QUESTO server (`{ begin: true }`), non il
+ * browser: `updated_at` viene scritto dal database, e un PC con l'orologio
+ * avanti di un minuto avrebbe fatto disattivare anche i prodotti appena
+ * salvati.
  *
  * Lavora a blocchi e dice quanti ne restano, in modo che ogni chiamata resti
  * breve anche su cataloghi grandi.
@@ -20,18 +25,29 @@ import { supabaseAdmin } from './utils/supabase-admin';
 const CHUNK = 300;
 
 interface RequestBody {
-  /** ISO 8601: istante di inizio dell'import. */
-  startedAt: string;
+  /** Se true restituisce solo l'istante corrente del server. */
+  begin?: boolean;
+  /** ISO 8601: istante di inizio dell'import, ottenuto con `begin`. */
+  startedAt?: string;
 }
 
 export const handler: Handler = withMoca(['POST'], async (event, moca, headers) => {
   requireWriteAccess(moca);
 
   const body = parseBody<RequestBody>(event);
-  const startedAt = body.startedAt ? new Date(body.startedAt) : null;
 
+  if (body.begin) {
+    return ok({ startedAt: new Date().toISOString() }, headers);
+  }
+
+  const startedAt = body.startedAt ? new Date(body.startedAt) : null;
   if (!startedAt || Number.isNaN(startedAt.getTime())) {
     throw new HttpError(400, 'Istante di inizio import mancante o non valido');
+  }
+  // Un istante nel futuro non puo' venire da `begin`: sarebbe l'orologio del
+  // browser, e disattiverebbe tutto il catalogo.
+  if (startedAt.getTime() > Date.now() + 5000) {
+    throw new HttpError(400, 'Istante di inizio import non valido: richiedilo al server con begin');
   }
 
   const db = supabaseAdmin();

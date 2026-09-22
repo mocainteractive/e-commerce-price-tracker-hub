@@ -1,7 +1,7 @@
 /** Formattazione in convenzione italiana. */
 
 export function formatPrice(value: number | null | undefined, currency = 'EUR'): string {
-  if (value === null || value === undefined) return '—';
+  if (value === null || value === undefined) return 'n.d.';
   return new Intl.NumberFormat('it-IT', {
     style: 'currency',
     currency,
@@ -10,7 +10,7 @@ export function formatPrice(value: number | null | undefined, currency = 'EUR'):
 }
 
 export function formatPercent(value: number | null | undefined, withSign = true): string {
-  if (value === null || value === undefined) return '—';
+  if (value === null || value === undefined) return 'n.d.';
   const formatted = new Intl.NumberFormat('it-IT', {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
@@ -22,19 +22,19 @@ export function formatPercent(value: number | null | undefined, withSign = true)
 }
 
 export function formatNumber(value: number | null | undefined): string {
-  if (value === null || value === undefined) return '—';
+  if (value === null || value === undefined) return 'n.d.';
   return new Intl.NumberFormat('it-IT').format(value);
 }
 
 export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
+  if (!iso) return 'n.d.';
   return new Intl.DateTimeFormat('it-IT', { day: '2-digit', month: 'short', year: 'numeric' }).format(
     new Date(iso),
   );
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return '—';
+  if (!iso) return 'n.d.';
   return new Intl.DateTimeFormat('it-IT', {
     day: '2-digit',
     month: 'short',

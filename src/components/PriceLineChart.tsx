@@ -259,7 +259,7 @@ function DataTable({
                 const point = s.points.find((p) => p.day === day);
                 return (
                   <td key={s.key} className="py-2 pr-4 tabular-nums">
-                    {point ? formatPrice(point.price, currency) : '—'}
+                    {point ? formatPrice(point.price, currency) : 'n.d.'}
                   </td>
                 );
               })}

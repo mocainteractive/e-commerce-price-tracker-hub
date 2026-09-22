@@ -38,6 +38,8 @@ export interface MocaRequestContext {
   role: string;
   dfs_login?: string;
   dfs_password?: string;
+  ai_key?: string;
+  ai_model?: string;
 }
 
 interface MocaContextValue {
@@ -48,6 +50,8 @@ interface MocaContextValue {
   hasConfig: (key: string) => boolean;
   /** true se il cliente ha le credenziali DataForSEO configurate nell'Hub. */
   hasDataForSeo: boolean;
+  /** true se il cliente ha una chiave Anthropic nell'Hub (verifica AI dei match). */
+  hasAi: boolean;
   /** false per i ruoli in sola lettura (external). */
   canWrite: boolean;
   /** Contesto da inoltrare alle Netlify Functions. */
@@ -125,6 +129,7 @@ export function MocaProvider({ children }: { children: ReactNode }) {
             configurations: {
               [CONFIG_KEYS.dfsLogin]: (import.meta.env.VITE_DEV_DATAFORSEO_LOGIN as string) ?? '',
               [CONFIG_KEYS.dfsPassword]: (import.meta.env.VITE_DEV_DATAFORSEO_PASSWORD as string) ?? '',
+              [CONFIG_KEYS.anthropicKey]: (import.meta.env.VITE_DEV_ANTHROPIC_API_KEY as string) ?? '',
             },
           });
         }
@@ -156,6 +161,8 @@ export function MocaProvider({ children }: { children: ReactNode }) {
 
     const dfsLogin = sdk.getConfig(CONFIG_KEYS.dfsLogin) ?? '';
     const dfsPassword = sdk.getConfig(CONFIG_KEYS.dfsPassword) ?? '';
+    const aiKey = sdk.getConfig(CONFIG_KEYS.anthropicKey) ?? '';
+    const aiModel = sdk.getConfig(CONFIG_KEYS.anthropicModel) ?? '';
 
     return {
       client,
@@ -167,6 +174,7 @@ export function MocaProvider({ children }: { children: ReactNode }) {
         return typeof v === 'string' && v.length > 0;
       },
       hasDataForSeo: Boolean(dfsLogin && dfsPassword),
+      hasAi: Boolean(aiKey),
       canWrite: user.role !== 'external',
       requestContext: {
         client_id: client.id,
@@ -177,6 +185,7 @@ export function MocaProvider({ children }: { children: ReactNode }) {
         // Inoltrate solo se presenti: le functions hanno un fallback
         // sulle configurazioni cliente dell'Hub.
         ...(dfsLogin && dfsPassword ? { dfs_login: dfsLogin, dfs_password: dfsPassword } : {}),
+        ...(aiKey ? { ai_key: aiKey, ...(aiModel ? { ai_model: aiModel } : {}) } : {}),
       },
       logout: () => {
         sdk.logout();

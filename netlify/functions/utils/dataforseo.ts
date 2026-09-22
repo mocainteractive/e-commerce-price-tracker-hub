@@ -167,6 +167,13 @@ export interface TaskHandle {
   statusMessage: string;
 }
 
+/**
+ * Timeout di default per una chiamata. Le Netlify Functions hanno ~10 secondi:
+ * senza un limite proprio, una richiesta lenta a DataForSEO faceva uccidere la
+ * funzione dalla piattaforma e il browser riceveva un 502 senza spiegazione.
+ */
+export const DEFAULT_TIMEOUT_MS = 7000;
+
 export class DataForSeoClient {
   private readonly authHeader: string;
 
@@ -178,7 +185,11 @@ export class DataForSeoClient {
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
   ): Promise<DfsEnvelope<T>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(timeoutMs, 500));
+
     let response: Response;
     try {
       response = await fetch(`${BASE_URL}${path}`, {
@@ -188,10 +199,20 @@ export class DataForSeoClient {
           'Content-Type': 'application/json',
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
       });
     } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        throw new HttpError(
+          504,
+          `DataForSEO non ha risposto entro ${(timeoutMs / 1000).toFixed(1)} secondi: la ricerca verra' ritentata`,
+          'DATAFORSEO_TIMEOUT',
+        );
+      }
       console.error(`[dataforseo] Errore di rete su ${path}:`, err);
       throw new HttpError(502, 'DataForSEO non raggiungibile');
+    } finally {
+      clearTimeout(timer);
     }
 
     if (response.status === 401) {
@@ -272,18 +293,24 @@ export class DataForSeoClient {
     locationCode: number,
     languageCode: string,
     depth = 30,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
   ): Promise<OrganicResult | null> {
-    const res = await this.request<OrganicResult>('POST', '/v3/serp/google/organic/live/advanced', [
-      {
-        keyword,
-        location_code: locationCode,
-        language_code: languageCode,
-        depth,
-        // I risultati e-commerce con prezzo arrivano dalla ricerca desktop.
-        device: 'desktop',
-        os: 'windows',
-      },
-    ]);
+    const res = await this.request<OrganicResult>(
+      'POST',
+      '/v3/serp/google/organic/live/advanced',
+      [
+        {
+          keyword,
+          location_code: locationCode,
+          language_code: languageCode,
+          depth,
+          // I risultati e-commerce con prezzo arrivano dalla ricerca desktop.
+          device: 'desktop',
+          os: 'windows',
+        },
+      ],
+      timeoutMs,
+    );
     return firstResult(res);
   }
 

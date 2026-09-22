@@ -43,7 +43,7 @@ export interface Match {
   seller_name: string | null;
   offer_url: string;
   offer_title: string | null;
-  match_method: 'gtin' | 'mpn' | 'google_shopping' | 'serp' | 'manual';
+  match_method: 'gtin' | 'mpn' | 'google_shopping' | 'serp' | 'ai' | 'manual';
   confidence: number;
   status: 'auto' | 'confermato' | 'escluso';
   last_seen_at: string;
@@ -88,6 +88,8 @@ export interface Settings {
   max_products_per_scan: number;
   search_source: 'serp' | 'shopping' | 'entrambe';
   search_gtin_pass: boolean;
+  ai_match_enabled: boolean;
+  serp_page_prices: boolean;
 }
 
 export interface Alert {
@@ -114,6 +116,7 @@ export interface ScanRun {
   started_at: string;
   finished_at: string | null;
   pendingTasks?: number;
+  search_source?: 'serp' | 'shopping' | 'entrambe' | null;
 }
 
 export interface PriceIndexPoint {

@@ -9,11 +9,12 @@
  *   e le chiavi che servono, via body o header.
  *
  * Qui il contesto viene letto e normalizzato una volta sola, cosi' ogni
- * endpoint parte dagli stessi campi gia' validati.
+ * endpoint parte dagli stessi campi gia' validati. Il ruolo che conta e'
+ * quello letto dall'Hub in `assertClientAccess`, non quello dichiarato.
  */
 import type { HandlerEvent, HandlerResponse } from '@netlify/functions';
 import { HttpError, parseBody, withHttp } from './http';
-import { assertClientAccess } from './client-config';
+import { assertClientAccess, type AiCredentials } from './client-config';
 
 /** Ruoli reali dell'Hub. */
 export type MocaRole = 'super_admin' | 'manager' | 'specialist' | 'external' | 'admin';
@@ -26,6 +27,8 @@ export interface MocaContext {
   role: MocaRole;
   /** Credenziali DataForSEO inoltrate dal frontend, se disponibili. */
   dataForSeo: { login: string; password: string } | null;
+  /** Chiave Anthropic per la verifica AI dei match, se configurata sull'Hub. */
+  ai: AiCredentials | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,6 +41,8 @@ interface ContextPayload {
   role?: string;
   dfs_login?: string;
   dfs_password?: string;
+  ai_key?: string;
+  ai_model?: string;
 }
 
 /**
@@ -59,16 +64,23 @@ function readContext(event: HandlerEvent): MocaContext {
     throw new HttpError(400, 'Identificativo cliente non valido', 'BAD_CLIENT_ID');
   }
 
+  const userId = payload.user_id?.trim() ?? '';
+  if (userId && !UUID_RE.test(userId)) {
+    throw new HttpError(400, 'Identificativo utente non valido', 'BAD_USER_ID');
+  }
+
   const login = payload.dfs_login?.trim() ?? '';
   const password = payload.dfs_password?.trim() ?? '';
+  const aiKey = payload.ai_key?.trim() ?? '';
 
   return {
     clientId,
     clientName: payload.client_name?.trim() ?? '',
-    userId: payload.user_id?.trim() ?? '',
+    userId,
     userName: payload.user_name?.trim() ?? '',
     role: (payload.role as MocaRole) ?? 'specialist',
     dataForSeo: login && password ? { login, password } : null,
+    ai: aiKey ? { apiKey: aiKey, model: payload.ai_model?.trim() || null } : null,
   };
 }
 
@@ -90,7 +102,7 @@ export function withMoca(
 ) {
   return withHttp(methods, async (event, headers) => {
     const moca = readContext(event);
-    await assertClientAccess(moca.userId, moca.clientId, moca.role);
+    moca.role = (await assertClientAccess(moca.userId, moca.clientId, moca.role)) as MocaRole;
     return handler(event, moca, headers);
   });
 }

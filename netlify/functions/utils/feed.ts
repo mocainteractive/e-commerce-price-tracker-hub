@@ -42,7 +42,13 @@ const parser = new XMLParser({
 // Feed Google Merchant (RSS 2.0 o Atom)
 // -----------------------------------------------------------------------------
 
-export function parseFeedXml(xml: string, limit = 5000): CatalogRow[] {
+/**
+ * Senza limite di default: un feed da 17.000 prodotti si interpreta in un
+ * secondo, e troncarlo in silenzio a 5.000 righe faceva sparire due terzi del
+ * catalogo senza che nessuno se ne accorgesse. Il tetto lo decide chi chiama,
+ * e lo comunica (vedi fetch-source).
+ */
+export function parseFeedXml(xml: string, limit = Number.POSITIVE_INFINITY): CatalogRow[] {
   let doc: Record<string, any>;
   try {
     doc = parser.parse(xml) as Record<string, any>;
@@ -141,7 +147,7 @@ const CSV_ALIASES: Record<keyof CatalogRow, string[]> = {
   availability: ['availability', 'disponibilita', 'stock'],
 };
 
-export function importFromCsv(content: string, limit = 5000): CatalogRow[] {
+export function importFromCsv(content: string, limit = Number.POSITIVE_INFINITY): CatalogRow[] {
   const table = parseCsv(content);
   if (table.length < 2) throw new Error('Il CSV non contiene righe di dati');
 

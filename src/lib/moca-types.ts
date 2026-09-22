@@ -44,4 +44,8 @@ export interface MocaSDKInstance {
 export const CONFIG_KEYS = {
   dfsLogin: 'DATAFORSEO_LOGIN',
   dfsPassword: 'DATAFORSEO_PASSWORD',
+  /** Facoltativa: abilita la verifica AI dei match incerti. */
+  anthropicKey: 'ANTHROPIC_API_KEY',
+  /** Facoltativa: modello Claude da usare, altrimenti quello predefinito. */
+  anthropicModel: 'ANTHROPIC_MODEL',
 } as const;

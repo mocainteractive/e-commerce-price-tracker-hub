@@ -7,6 +7,7 @@
  * consegnato due volte.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { HttpError } from './http';
 import {
   DataForSeoClient,
   type ProductsResult,
@@ -349,23 +350,35 @@ export async function persistOffers(
   const deduped = [...bestByDomain.values()];
 
   // 1. Match (upsert idempotente sulla tripla prodotto/dominio/url).
-  const { data: matches, error: matchError } = await db
-    .from('pt_matches')
-    .upsert(
-      deduped.map((offer) => ({
+  const matchRows = (allowAi: boolean) =>
+    deduped.map((offer) => {
+      const method = offer.matchMethod ?? ctx.defaultMatchMethod;
+      return {
         client_id: product.client_id,
         product_id: product.id,
         domain: offer.domain,
         seller_name: offer.sellerName,
         offer_url: offer.offerUrl,
         offer_title: offer.offerTitle,
-        match_method: offer.matchMethod ?? ctx.defaultMatchMethod,
+        // Il metodo 'ai' esiste dalla migration 0003: senza, si degrada a 'serp'.
+        match_method: method === 'ai' && !allowAi ? 'serp' : method,
         confidence: offer.confidence ?? ctx.defaultConfidence,
         last_seen_at: now,
-      })),
-      { onConflict: 'product_id,domain,offer_url', ignoreDuplicates: false },
-    )
+      };
+    });
+
+  let { data: matches, error: matchError } = await db
+    .from('pt_matches')
+    .upsert(matchRows(true), { onConflict: 'product_id,domain,offer_url', ignoreDuplicates: false })
     .select('id, domain');
+
+  if (matchError && /match_method/.test(matchError.message)) {
+    console.warn('[scan] match_method ai non ammesso (migration 0003 assente): salvo come serp');
+    ({ data: matches, error: matchError } = await db
+      .from('pt_matches')
+      .upsert(matchRows(false), { onConflict: 'product_id,domain,offer_url', ignoreDuplicates: false })
+      .select('id, domain'));
+  }
 
   if (matchError) {
     console.error('[scan] Upsert match fallito:', matchError.message);
@@ -479,49 +492,173 @@ async function markTask(
     .eq('id', taskId);
 }
 
+export type RunStatus = 'in_corso' | 'completata' | 'parziale' | 'errore';
+
+export type RunSource = 'serp' | 'shopping' | 'entrambe';
+
+export interface RunStatusInput {
+  /** Prodotti previsti e prodotti analizzati dal percorso sincrono (SERP). */
+  productsTotal: number;
+  productsDone: number;
+  /** Task Google Shopping della run, per stato. Vuoti per una run solo SERP. */
+  tasks: Array<{ status: string }>;
+  startedAt: string | null;
+  /** Fonte della run: decide se conta il cursore SERP, i task, o entrambi. */
+  searchSource?: RunSource;
+  /** Solo per i test: "adesso". */
+  now?: number;
+}
+
+/** Oltre questo tempo una run aperta viene chiusa come parziale. */
+const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
 /**
- * Aggiorna i contatori della run e la chiude quando non restano task in volo.
- * Una run che resta aperta oltre 2 ore viene marcata come parziale.
+ * Decide lo stato di una run. Funzione pura, cosi' si puo' verificare.
+ *
+ * Il caso senza task era il buco: una run SERP non ne crea, e la versione
+ * precedente usciva senza toccare lo stato. La run restava "in corso" per
+ * sempre, il pulsante Avvia scansione restava disabilitato e la scansione
+ * pianificata saltava il cliente.
+ */
+export function computeRunStatus(input: RunStatusInput): {
+  status: RunStatus;
+  finished: boolean;
+  productsDone: number;
+  errorMessage: string | null;
+} {
+  const now = input.now ?? Date.now();
+  const startedAt = input.startedAt ? new Date(input.startedAt).getTime() : now;
+  const stale = now - startedAt > STALE_AFTER_MS;
+
+  const pending = input.tasks.filter((t) => t.status === 'in_attesa').length;
+  const failed = input.tasks.filter((t) => t.status === 'errore').length;
+  const tasksDone = input.tasks.length - pending;
+
+  // Senza fonte dichiarata (run create prima della migration 0003) si deduce:
+  // se ha task e' Google Shopping, altrimenti SERP.
+  const source: RunSource = input.searchSource ?? (input.tasks.length > 0 ? 'shopping' : 'serp');
+
+  // La parte sincrona e' finita quando il cursore ha raggiunto il totale.
+  // Una run solo Shopping non ha cursore: per lei conta solo lo stato dei task.
+  const serpDone = source === 'shopping' || input.productsDone >= input.productsTotal;
+  const productsDone = source === 'shopping' ? tasksDone : input.productsDone;
+
+  const finished = (serpDone && pending === 0) || stale;
+  if (!finished) return { status: 'in_corso', finished: false, productsDone, errorMessage: null };
+
+  const allTasksFailed = input.tasks.length > 0 && failed === input.tasks.length;
+  const status: RunStatus = allTasksFailed
+    ? 'errore'
+    : failed > 0 || pending > 0 || !serpDone
+      ? 'parziale'
+      : 'completata';
+
+  const errorMessage = failed > 0
+    ? `${failed} prodotti non elaborati`
+    : stale && !serpDone
+      ? 'Scansione interrotta: non tutti i prodotti sono stati analizzati'
+      : null;
+
+  return { status, finished: true, productsDone, errorMessage };
+}
+
+/**
+ * Aggiorna i contatori della run e la chiude quando non resta lavoro:
+ * ne' task Google Shopping in volo, ne' prodotti da cercare sulla SERP.
  */
 export async function refreshRunStatus(db: SupabaseClient, runId: string): Promise<void> {
-  const { data: tasks } = await db
-    .from('pt_scan_tasks')
-    .select('status')
-    .eq('run_id', runId);
+  const [{ data: tasks }, run] = await Promise.all([
+    db.from('pt_scan_tasks').select('status').eq('run_id', runId),
+    loadRun(db, runId),
+  ]);
 
-  if (!tasks || tasks.length === 0) return;
+  if (!run) return;
+  // Una run gia' chiusa non si riapre: il postback tardivo di un task non
+  // deve rimettere "in corso" una scansione conclusa.
+  if (run.status !== 'in_corso') return;
 
-  const pending = tasks.filter((t) => t.status === 'in_attesa').length;
-  const failed = tasks.filter((t) => t.status === 'errore').length;
-  const done = tasks.length - pending;
-
-  const { data: run } = await db
-    .from('pt_scan_runs')
-    .select('started_at, offers_found')
-    .eq('id', runId)
-    .single();
-
-  const startedAt = run?.started_at ? new Date(run.started_at).getTime() : Date.now();
-  const stale = Date.now() - startedAt > 2 * 60 * 60 * 1000;
-
-  const finished = pending === 0 || stale;
-  const status = !finished
-    ? 'in_corso'
-    : failed === tasks.length
-      ? 'errore'
-      : failed > 0 || pending > 0
-        ? 'parziale'
-        : 'completata';
+  const verdict = computeRunStatus({
+    productsTotal: Number(run.products_total ?? 0),
+    productsDone: Number(run.products_done ?? 0),
+    tasks: (tasks ?? []) as Array<{ status: string }>,
+    startedAt: run.started_at,
+    searchSource: run.search_source ?? undefined,
+  });
 
   await db
     .from('pt_scan_runs')
     .update({
-      status,
-      products_done: done,
-      finished_at: finished ? new Date().toISOString() : null,
-      error_message: failed > 0 ? `${failed} prodotti non elaborati` : null,
+      status: verdict.status,
+      products_done: verdict.productsDone,
+      finished_at: verdict.finished ? new Date().toISOString() : null,
+      error_message: verdict.errorMessage,
     })
     .eq('id', runId);
+}
+
+export interface RunRow {
+  id: string;
+  client_id: string;
+  status: string;
+  products_total: number;
+  products_done: number;
+  started_at: string | null;
+  /** Assente se la migration 0003 non e' stata applicata. */
+  search_source: RunSource | null;
+}
+
+/**
+ * Legge una run tollerando l'assenza della colonna `search_source`
+ * (migration 0003 non applicata): in quel caso la fonte resta null e viene
+ * dedotta dai task.
+ */
+export async function loadRun(db: SupabaseClient, runId: string): Promise<RunRow | null> {
+  const base = 'id, client_id, status, products_total, products_done, started_at';
+  const full = await db.from('pt_scan_runs').select(`${base}, search_source`).eq('id', runId).maybeSingle();
+  if (!full.error) return (full.data as RunRow | null) ?? null;
+
+  const { data } = await db.from('pt_scan_runs').select(base).eq('id', runId).maybeSingle();
+  return data ? ({ ...(data as Omit<RunRow, 'search_source'>), search_source: null } as RunRow) : null;
+}
+
+/**
+ * Crea una run. Registra la fonte quando la colonna esiste (migration 0003),
+ * altrimenti ripiega sulle sole colonne originali.
+ */
+export async function createRun(
+  db: SupabaseClient,
+  input: {
+    clientId: string;
+    triggeredBy: 'manuale' | 'pianificata';
+    triggeredByUser: string | null;
+    productsTotal: number;
+    searchSource: RunSource;
+  },
+): Promise<string> {
+  const base = {
+    client_id: input.clientId,
+    triggered_by: input.triggeredBy,
+    triggered_by_user: input.triggeredByUser,
+    products_total: input.productsTotal,
+    status: 'in_corso',
+  };
+
+  let { data, error } = await db
+    .from('pt_scan_runs')
+    .insert({ ...base, search_source: input.searchSource })
+    .select('id')
+    .single();
+
+  if (error && /search_source/.test(error.message)) {
+    console.warn('[scan] Colonna search_source assente (migration 0003): run creata senza fonte');
+    ({ data, error } = await db.from('pt_scan_runs').insert(base).select('id').single());
+  }
+
+  if (error || !data) {
+    console.error('[scan] Creazione run fallita:', error?.message);
+    throw new HttpError(500, `Impossibile avviare la scansione: ${error?.message ?? 'errore sconosciuto'}`);
+  }
+  return data.id as string;
 }
 
 /** Somma le offerte trovate a una run (contatore cumulativo). */

@@ -1,9 +1,10 @@
 /**
  * POST /api/scan-start
  *
- * Crea la scansione e accoda il PRIMO lotto di prodotti su DataForSEO.
- * Restituisce `remaining`: il browser richiama `scan-enqueue` finche' non
- * arriva a zero.
+ * Crea la scansione. Con la fonte SERP non c'e' nulla da accodare: il browser
+ * chiama `scan-serp` un prodotto per volta. Con Google Shopping accoda il
+ * primo lotto di task e il browser prosegue con `scan-enqueue`. Con
+ * "entrambe" fa le due cose.
  *
  * Perche' a lotti: accodare significa una chiamata HTTP a DataForSEO ogni
  * 100 prodotti, e su un catalogo grande la somma supererebbe i ~10 secondi
@@ -18,6 +19,7 @@ import { resolveDataForSeoCredentials } from './utils/client-config';
 import { DataForSeoClient } from './utils/dataforseo';
 import { enqueueBatch, PRODUCTS_PER_CALL } from './utils/scan-runner';
 import { loadScanSettings } from './utils/scan-settings';
+import { createRun } from './utils/scan-processing';
 
 interface RequestBody {
   productIds?: string[];
@@ -66,60 +68,47 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
     );
   }
 
-  const { data: run, error: runError } = await db
-    .from('pt_scan_runs')
-    .insert({
-      client_id: moca.clientId,
-      triggered_by: 'manuale',
-      triggered_by_user: moca.userId || null,
-      products_total: productsTotal,
-      status: 'in_corso',
-    })
-    .select('id')
-    .single();
-
-  if (runError || !run) {
-    console.error('[scan-start] Creazione run fallita:', runError?.message);
-    throw new HttpError(500, `Impossibile avviare la scansione: ${runError?.message ?? 'errore sconosciuto'}`);
-  }
-
-  const runId = run.id as string;
-
-  // Con la SERP organica non c'e' nulla da accodare: la ricerca e' sincrona
-  // e il browser chiama direttamente `scan-serp` lotto dopo lotto.
-  if (settings.search_source === 'serp') {
-    return ok(
-      {
-        runId,
-        productsTotal,
-        fonte: 'serp',
-        enqueued: 0,
-        tasksCreated: 0,
-        nextOffset: 0,
-        remaining: productsTotal,
-        cercaAncheEan: settings.search_gtin_pass,
-      },
-      headers,
-    );
-  }
-
-  const batch = await enqueueBatch(db, dfs, {
+  const runId = await createRun(db, {
     clientId: moca.clientId,
-    runId,
-    settings,
-    productIds: body.productIds,
-    offset: 0,
+    triggeredBy: 'manuale',
+    triggeredByUser: moca.userId || null,
+    productsTotal,
+    searchSource: settings.search_source,
   });
+
+  const fonte = settings.search_source;
+  const usaSerp = fonte === 'serp' || fonte === 'entrambe';
+  const usaShopping = fonte === 'shopping' || fonte === 'entrambe';
+
+  let enqueued = 0;
+  let tasksCreated = 0;
+  let nextOffset = 0;
+
+  if (usaShopping) {
+    const batch = await enqueueBatch(db, dfs, {
+      clientId: moca.clientId,
+      runId,
+      settings,
+      productIds: body.productIds,
+      offset: 0,
+    });
+    enqueued = batch.enqueued;
+    tasksCreated = batch.tasksCreated;
+    nextOffset = batch.nextOffset;
+  }
 
   return ok(
     {
       runId,
       productsTotal,
-      fonte: settings.search_source,
-      enqueued: batch.enqueued,
-      tasksCreated: batch.tasksCreated,
-      nextOffset: batch.nextOffset,
-      remaining: Math.max(productsTotal - batch.nextOffset, 0),
+      fonte,
+      // Cursore della parte SERP (sincrona, un prodotto per chiamata).
+      serpRemaining: usaSerp ? productsTotal : 0,
+      // Cursore della parte Google Shopping (asincrona, a lotti).
+      enqueued,
+      tasksCreated,
+      nextOffset,
+      remaining: usaShopping ? Math.max(productsTotal - nextOffset, 0) : 0,
       batchSize: PRODUCTS_PER_CALL,
       cercaAncheEan: settings.search_gtin_pass,
     },

@@ -13,16 +13,29 @@ export const handler: Handler = withMoca(['GET'], async (event, moca, headers) =
   const limit = Math.min(Math.max(Number(event.queryStringParameters?.limit ?? 20), 1), 50);
   const db = supabaseAdmin();
 
-  const { data: runs } = await db
+  const base =
+    'id, triggered_by, status, products_total, products_done, offers_found, error_message, started_at, finished_at';
+
+  // `search_source` esiste dalla migration 0003: senza, si legge il resto.
+  let rows: Array<Record<string, unknown>> = [];
+  const full = await db
     .from('pt_scan_runs')
-    .select(
-      'id, triggered_by, status, products_total, products_done, offers_found, error_message, started_at, finished_at',
-    )
+    .select(`${base}, search_source`)
     .eq('client_id', moca.clientId)
     .order('started_at', { ascending: false })
     .limit(limit);
 
-  const rows = runs ?? [];
+  if (!full.error) {
+    rows = (full.data ?? []) as Array<Record<string, unknown>>;
+  } else {
+    const { data } = await db
+      .from('pt_scan_runs')
+      .select(base)
+      .eq('client_id', moca.clientId)
+      .order('started_at', { ascending: false })
+      .limit(limit);
+    rows = (data ?? []) as Array<Record<string, unknown>>;
+  }
 
   // Task ancora in attesa, per run: e' il numero che l'utente vuole vedere
   // scendere mentre la scansione procede.

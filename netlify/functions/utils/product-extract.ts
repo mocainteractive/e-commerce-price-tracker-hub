@@ -39,7 +39,7 @@ const EMPTY: ExtractedProduct = {
 const USER_AGENT =
   'Mozilla/5.0 (compatible; MocaPriceTracker/1.0; +https://mocainteractive.com)';
 
-export async function fetchHtml(url: string, timeoutMs = 12_000): Promise<string | null> {
+export async function fetchHtml(url: string, timeoutMs = 6_000): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -62,8 +62,11 @@ export async function fetchHtml(url: string, timeoutMs = 12_000): Promise<string
   }
 }
 
-export async function extractProductFromUrl(url: string): Promise<ExtractedProduct | null> {
-  const html = await fetchHtml(url);
+export async function extractProductFromUrl(
+  url: string,
+  timeoutMs?: number,
+): Promise<ExtractedProduct | null> {
+  const html = await fetchHtml(url, timeoutMs);
   if (!html) return null;
   return extractProductFromHtml(html);
 }
@@ -74,7 +77,11 @@ export function extractProductFromHtml(html: string): ExtractedProduct {
   const fromMeta = extractFromMeta(html);
 
   // Il JSON-LD ha la precedenza; gli altri riempiono solo i buchi.
-  return mergeFirstNonNull(fromJsonLd, fromMicrodata, fromMeta);
+  // Per il titolo, og:title viene prima del microdata: dentro un Product il
+  // primo `itemprop="name"` e' spesso quello del brand annidato, e sui siti
+  // senza JSON-LD ogni scheda prendeva il nome della marca come titolo.
+  const titoloMeta: ExtractedProduct = { ...EMPTY, title: fromMeta.title };
+  return mergeFirstNonNull(fromJsonLd, titoloMeta, fromMicrodata, fromMeta);
 }
 
 // -----------------------------------------------------------------------------
@@ -176,25 +183,42 @@ function findOffer(offers: unknown): JsonObject | null {
 // Microdata & meta tag
 // -----------------------------------------------------------------------------
 
+/**
+ * Microdata, ma solo dentro il blocco `itemtype=".../Product"`.
+ *
+ * Senza questo vincolo `itemprop="name"` prendeva il primo elemento della
+ * pagina, che sui siti con breadcrumb o nome del negozio in microdata e' il
+ * nome del sito: tutte le schede diventavano "Pellizzari E-commerce".
+ * Se la pagina non dichiara un Product, il microdata non e' affidabile e si
+ * passa ai meta tag.
+ */
 function extractFromMicrodata(html: string): ExtractedProduct {
+  const scope = productScope(html);
+  if (scope === null) return { ...EMPTY };
+
   const prop = (name: string): string | null => {
     const pattern = new RegExp(
       `<[^>]+itemprop=["']${name}["'][^>]*?(?:content|value)=["']([^"']+)["']`,
       'i',
     );
-    const withContent = html.match(pattern);
+    const withContent = scope.match(pattern);
     if (withContent) return withContent[1];
 
-    const inline = html.match(
+    const inline = scope.match(
       new RegExp(`<([a-z]+)[^>]+itemprop=["']${name}["'][^>]*>([^<]{1,200})<\\/\\1>`, 'i'),
     );
     return inline ? inline[2].trim() : null;
   };
 
+  // `itemprop="brand"` e' spesso un itemscope con il nome annidato.
+  const brandAnnidato = scope.match(
+    /itemprop=["']brand["'][^>]*>\s*<(?:meta|span)[^>]+itemprop=["']name["'][^>]*?(?:content=["']([^"']+)["']|>([^<]{1,100})<)/i,
+  );
+
   return {
     ...EMPTY,
     title: prop('name'),
-    brand: prop('brand'),
+    brand: prop('brand') ?? brandAnnidato?.[1] ?? brandAnnidato?.[2]?.trim() ?? null,
     gtin: prop('gtin13') ?? prop('gtin') ?? prop('ean'),
     mpn: prop('mpn'),
     sku: prop('sku'),
@@ -204,6 +228,19 @@ function extractFromMicrodata(html: string): ExtractedProduct {
     availability: normalizeAvailability(prop('availability')),
     imageUrl: prop('image'),
   };
+}
+
+/** Porzione di HTML che inizia dall'itemscope Product, se c'e'. */
+function productScope(html: string): string | null {
+  const match = html.match(/itemtype=["']https?:\/\/schema\.org\/Product["']/i);
+  if (!match || match.index === undefined) return null;
+  // Dall'apertura del Product in avanti: i suoi itemprop vengono dopo.
+  return html.slice(match.index);
+}
+
+/** "Pantaloni cropped | Pellizzari" -> "Pantaloni cropped". */
+function stripSiteSuffix(title: string): string {
+  return title.replace(/\s+[|–—-]\s+[^|–—-]{1,40}$/, '').trim() || title;
 }
 
 function extractFromMeta(html: string): ExtractedProduct {
@@ -223,7 +260,7 @@ function extractFromMeta(html: string): ExtractedProduct {
 
   return {
     ...EMPTY,
-    title: meta('og:title') ?? (titleTag ? titleTag[1].trim() : null),
+    title: meta('og:title') ?? (titleTag ? stripSiteSuffix(titleTag[1].trim()) : null),
     brand: meta('product:brand') ?? meta('og:brand'),
     gtin: meta('product:ean') ?? meta('product:gtin'),
     mpn: meta('product:mfr_part_no'),

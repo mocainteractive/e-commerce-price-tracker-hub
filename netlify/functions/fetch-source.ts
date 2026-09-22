@@ -11,6 +11,10 @@
  * Restituisce dati gia' interpretati (righe di catalogo o URL di sitemap),
  * non il documento grezzo: trasferire un feed da qualche megabyte al browser
  * per poi rimandarlo indietro sarebbe solo spreco.
+ *
+ * La risposta di una funzione non puo' superare i 6 MB: per questo esiste un
+ * tetto di righe, ma quando scatta viene detto (`total`, `truncated`), cosi'
+ * l'import puo' avvisare invece di far sparire prodotti in silenzio.
  */
 import type { Handler } from '@netlify/functions';
 import { HttpError, ok, parseBody } from './utils/http';
@@ -24,11 +28,14 @@ interface RequestBody {
   limit?: number;
 }
 
+/** Circa 450 byte a riga: 12.000 righe restano sotto i 6 MB di risposta. */
+export const MAX_ROWS = 12000;
+
 export const handler: Handler = withMoca(['POST'], async (event, _moca, headers) => {
   const body = parseBody<RequestBody>(event);
   if (!body.url) throw new HttpError(400, 'URL mancante');
 
-  const limit = Math.min(body.limit ?? 5000, 20000);
+  const limit = Math.min(Math.max(Number(body.limit) || MAX_ROWS, 1), MAX_ROWS);
   const fetched = await fetchText(body.url);
 
   try {
@@ -37,13 +44,19 @@ export const handler: Handler = withMoca(['POST'], async (event, _moca, headers)
       return ok({ kind: 'sitemap', urls, nested, elapsedMs: fetched.elapsedMs }, headers);
     }
 
-    if (body.kind === 'csv') {
-      const rows = importFromCsv(fetched.body, limit);
-      return ok({ kind: 'csv', rows, elapsedMs: fetched.elapsedMs }, headers);
-    }
+    const all = body.kind === 'csv' ? importFromCsv(fetched.body) : parseFeedXml(fetched.body);
+    const rows = all.slice(0, limit);
 
-    const rows = parseFeedXml(fetched.body, limit);
-    return ok({ kind: 'feed', rows, elapsedMs: fetched.elapsedMs }, headers);
+    return ok(
+      {
+        kind: body.kind === 'csv' ? 'csv' : 'feed',
+        rows,
+        total: all.length,
+        truncated: all.length > rows.length,
+        elapsedMs: fetched.elapsedMs,
+      },
+      headers,
+    );
   } catch (err) {
     if (err instanceof HttpError) throw err;
 
