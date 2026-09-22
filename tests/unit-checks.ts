@@ -12,6 +12,7 @@ import {
   normalizeGtin,
   scoreMatch,
   buildSearchQuery,
+  buildGtinQuery,
   tokenSimilarity,
   normalizeDomain,
   priceProximity,
@@ -67,8 +68,15 @@ eq('accessorio scartato', accessorio.accepted, false);
 const simile = scoreMatch(subject, { title: 'Sony Cuffie Wireless WH 1000 XM5 colore nero', price: 355 });
 eq('prodotto simile accettato', simile.accepted, true);
 
-eq('query da GTIN', buildSearchQuery(subject), '4006381333931');
-eq('query senza GTIN', buildSearchQuery({ ...subject, gtin: null }), 'Sony WH1000XM5B WH-1000XM5 Cuffie Wireless');
+// La query NON deve mai essere il solo EAN: su Google un numero isolato
+// porta risultati estranei. Vedi tests/serp-matching.ts per la prova sul campo.
+eq(
+  'query: marca, codice e titolo',
+  buildSearchQuery(subject),
+  'Sony WH1000XM5B WH-1000XM5 Cuffie Wireless',
+);
+eq('query: identica anche con EAN presente', buildSearchQuery({ ...subject, gtin: null }), buildSearchQuery(subject));
+eq('query: EAN disponibile a parte', buildGtinQuery(subject), '4006381333931');
 
 // --- estrazione JSON-LD ---
 const html = `<html><head><script type="application/ld+json">

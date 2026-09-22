@@ -216,18 +216,48 @@ export function scoreMatch(
 }
 
 /**
- * Query di ricerca per Google Shopping.
- * L'EAN da solo e' spesso la query migliore; senza EAN si usa brand + titolo.
+ * Query di ricerca del prodotto sui motori.
+ *
+ * **Mai il solo codice EAN.** Sembrava la scelta ovvia (e' l'identificatore
+ * piu' preciso) ed e' stata la causa di scansioni a vuoto: su Google un
+ * numero isolato porta pochi risultati pertinenti e molti completamente
+ * estranei, perche' i venditori raramente pubblicano l'EAN nel testo.
+ *
+ * Verificato sul campo con `Venezianico Arsenale 37 6121503C`, che trova
+ * quattro venditori con prezzo, contro l'EAN `8056590473955` che nelle stesse
+ * posizioni restituisce ammorbidenti e shampoo.
+ *
+ * La forma che funziona e' quella che userebbe una persona: marca, codice
+ * modello e nome del prodotto.
  */
 export function buildSearchQuery(subject: MatchSubject): string {
-  const gtin = normalizeGtin(subject.gtin);
-  if (gtin) return gtin;
-
   const parts = [subject.brand, subject.mpn ?? subject.sku, subject.title]
-    .filter((p): p is string => Boolean(p))
+    .filter((p): p is string => Boolean(p?.trim()))
     .map((p) => p.trim());
 
-  // Il titolo contiene gia' spesso il brand: evitiamo la ripetizione.
-  const query = [...new Set(parts.join(' ').split(/\s+/))].join(' ');
-  return query.slice(0, 700); // limite DataForSEO
+  if (parts.length === 0) return '';
+
+  // Il titolo ripete spesso marca e codice: togliamo i doppioni ignorando
+  // le maiuscole, mantenendo il primo modo in cui il termine compare.
+  const visti = new Set<string>();
+  const termini: string[] = [];
+
+  for (const termine of parts.join(' ').split(/\s+/)) {
+    const chiave = termine.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!chiave || visti.has(chiave)) continue;
+    visti.add(chiave);
+    termini.push(termine);
+  }
+
+  // Oltre una decina di parole la ricerca si restringe troppo.
+  return termini.slice(0, 12).join(' ').slice(0, 700);
+}
+
+/**
+ * Query alternativa sul solo EAN, usata come passata aggiuntiva.
+ * Quando un venditore pubblica davvero il codice, il match e' certo: vale
+ * la pena cercarlo, ma come integrazione, non come ricerca principale.
+ */
+export function buildGtinQuery(subject: MatchSubject): string | null {
+  return normalizeGtin(subject.gtin);
 }

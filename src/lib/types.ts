@@ -86,6 +86,8 @@ export interface Settings {
   overprice_threshold: number;
   auto_scan_enabled: boolean;
   max_products_per_scan: number;
+  search_source: 'serp' | 'shopping' | 'entrambe';
+  search_gtin_pass: boolean;
 }
 
 export interface Alert {

@@ -96,16 +96,41 @@ export interface ProductsResult {
   items?: ShoppingProductItem[] | null;
 }
 
+/**
+ * Item della SERP organica.
+ *
+ * `price` e' la ragione per cui questa fonte e' utile al confronto prezzi:
+ * Google mostra il prezzo nello snippet dei risultati e-commerce, e
+ * DataForSEO lo restituisce gia' interpretato. A differenza degli endpoint
+ * Google Shopping, questa chiamata e' **sincrona**: i risultati arrivano
+ * subito, senza task da attendere.
+ */
+export interface OrganicItem {
+  type?: string;
+  rank_group?: number;
+  rank_absolute?: number;
+  domain?: string;
+  title?: string;
+  url?: string;
+  description?: string;
+  breadcrumb?: string;
+  website_name?: string;
+  price?: {
+    current?: number | null;
+    regular?: number | null;
+    currency?: string | null;
+    displayed_price?: string | null;
+    is_price_range?: boolean;
+  } | null;
+}
+
 export interface OrganicResult {
   keyword?: string;
-  items?: Array<{
-    type?: string;
-    domain?: string;
-    title?: string;
-    url?: string;
-    description?: string;
-    breadcrumb?: string;
-  }> | null;
+  se_domain?: string;
+  location_code?: number;
+  language_code?: string;
+  items_count?: number;
+  items?: OrganicItem[] | null;
 }
 
 export interface ProductsTaskPayload {
@@ -235,17 +260,29 @@ export class DataForSeoClient {
   // --- SERP organico: fallback per EAN/SKU ----------------------------------
 
   /**
-   * Ricerca organica live. Serve a trovare il prodotto sui siti che non
-   * compaiono in Google Shopping (spesso il caso di EAN e codici articolo).
+   * Ricerca organica live: e' la fonte prezzi principale.
+   *
+   * Due motivi pratici rispetto a Google Shopping: e' **sincrona**, quindi i
+   * risultati si vedono subito invece di attendere un task; e gli item
+   * portano gia' il prezzo mostrato nello snippet, che per gli e-commerce
+   * e' quasi sempre presente.
    */
   async organicLive(
     keyword: string,
     locationCode: number,
     languageCode: string,
-    depth = 20,
+    depth = 30,
   ): Promise<OrganicResult | null> {
     const res = await this.request<OrganicResult>('POST', '/v3/serp/google/organic/live/advanced', [
-      { keyword, location_code: locationCode, language_code: languageCode, depth },
+      {
+        keyword,
+        location_code: locationCode,
+        language_code: languageCode,
+        depth,
+        // I risultati e-commerce con prezzo arrivano dalla ricerca desktop.
+        device: 'desktop',
+        os: 'windows',
+      },
     ]);
     return firstResult(res);
   }

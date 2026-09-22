@@ -20,5 +20,5 @@
   },
   // I parser di catalogo sono condivisi con le Netlify Functions: una sola
 // implementazione, usata sia nel browser sia lato server.
-"include": ["src", "netlify/functions/utils/feed.ts", "netlify/functions/utils/product-extract.ts", "netlify/functions/utils/matching.ts", "netlify/functions/utils/pricing.ts"]
+"include": ["src", "netlify/functions/utils/feed.ts", "netlify/functions/utils/product-extract.ts", "netlify/functions/utils/matching.ts", "netlify/functions/utils/pricing.ts", "netlify/functions/utils/sitemap-filter.ts"]
 }
