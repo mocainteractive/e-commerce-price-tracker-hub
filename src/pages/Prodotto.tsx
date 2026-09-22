@@ -51,6 +51,7 @@ const METHOD_LABELS: Record<Match['match_method'], string> = {
   mpn: 'Codice produttore',
   google_shopping: 'Google Shopping',
   serp: 'Ricerca organica',
+  ai: 'Confermato dall\'AI',
   manual: 'Inserito a mano',
 };
 
@@ -126,7 +127,7 @@ export function Prodotto() {
                 value={
                   comparison.rank
                     ? `${comparison.rank}° su ${comparison.competitorCount + 1}`
-                    : '—'
+                    : 'n.d.'
                 }
               />
             </dl>
@@ -187,7 +188,7 @@ export function Prodotto() {
                       {match.seller_name ?? match.domain}
                     </p>
                     <Badge tone={match.match_method === 'gtin' ? 'positivo' : 'info'}>
-                      {METHOD_LABELS[match.match_method]}
+                      {METHOD_LABELS[match.match_method] ?? match.match_method}
                     </Badge>
                     {match.status === 'confermato' && (
                       <Badge tone="positivo">

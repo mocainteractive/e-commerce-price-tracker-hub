@@ -77,8 +77,8 @@ export default function App() {
 
       <footer className="border-t border-gray-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 text-xs text-moca-gray">
-          Dati di mercato forniti da Google Shopping tramite DataForSEO. I prezzi
-          rilevati sono indicativi e possono variare rispetto a quelli di vendita.
+          Dati di mercato dalla ricerca Google e da Google Shopping tramite DataForSEO.
+          I prezzi rilevati sono indicativi e possono variare rispetto a quelli di vendita.
         </div>
       </footer>
     </div>

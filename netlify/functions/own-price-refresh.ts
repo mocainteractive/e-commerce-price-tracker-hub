@@ -20,7 +20,13 @@ import { extractProductFromUrl } from './utils/product-extract';
  * `remaining` non arriva a zero, mostrando l'avanzamento.
  */
 const BATCH_SIZE = 8;
-const CONCURRENCY = 4;
+/**
+ * Tutte insieme, con un timeout per pagina che tiene la chiamata entro i
+ * 10 secondi anche nel caso peggiore. Prima erano due giri da 4 con 12 secondi
+ * di timeout ciascuno: un sito lento portava la funzione a 24 secondi.
+ */
+const CONCURRENCY = BATCH_SIZE;
+const PAGE_TIMEOUT_MS = 6000;
 
 interface RequestBody {
   productIds?: string[];
@@ -72,7 +78,7 @@ export const handler: Handler = withMoca(['POST'], async (event, moca, headers) 
   for (let i = 0; i < products.length; i += CONCURRENCY) {
     const batch = products.slice(i, i + CONCURRENCY);
     const results = await Promise.all(
-      batch.map((p) => extractProductFromUrl(p.product_url as string)),
+      batch.map((p) => extractProductFromUrl(p.product_url as string, PAGE_TIMEOUT_MS)),
     );
 
     for (let j = 0; j < batch.length; j += 1) {

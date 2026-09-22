@@ -28,7 +28,7 @@ const LOCATIONS = [
 const CURRENCIES = ['EUR', 'GBP', 'USD', 'CHF'];
 
 export function Impostazioni() {
-  const { requestContext, canWrite, user } = useMoca();
+  const { requestContext, canWrite, user, hasAi } = useMoca();
   const { data, loading, error, reload } = useApiGet<SettingsResponse>('settings');
 
   const [form, setForm] = useState<Settings | null>(null);
@@ -40,8 +40,10 @@ export function Impostazioni() {
     if (data?.settings) setForm(data.settings);
   }, [data]);
 
-  if (loading || !form) return <LoadingBlock />;
+  // L'errore prima dello spinner: senza, un endpoint che fallisce lasciava
+  // la pagina a "Caricamento in corso" per sempre, senza dire perche'.
   if (error) return <ErrorBanner message={error} onRetry={reload} />;
+  if (loading || !form) return <LoadingBlock />;
 
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setForm((current) => (current ? { ...current, [key]: value } : current));
@@ -66,6 +68,8 @@ export function Impostazioni() {
           max_products_per_scan: Number(form.max_products_per_scan),
           search_source: form.search_source,
           search_gtin_pass: form.search_gtin_pass,
+          ai_match_enabled: form.ai_match_enabled ?? true,
+          serp_page_prices: form.serp_page_prices ?? true,
         },
       });
       setSaved(true);
@@ -236,14 +240,54 @@ export function Impostazioni() {
             >
               <option value="serp">Ricerca Google (consigliata)</option>
               <option value="shopping">Google Shopping</option>
+              <option value="entrambe">Entrambe</option>
             </select>
             <p className="mt-1 text-xs text-moca-gray">
               La ricerca Google e' immediata e i risultati portano gia' il prezzo:
               al termine della scansione i dati ci sono. Google Shopping lavora
               invece a richieste asincrone, quindi i risultati arrivano dopo e
-              vanno raccolti.
+              vanno raccolti. Con "Entrambe" si fanno tutte e due, al doppio del costo.
             </p>
           </div>
+
+          <label className="flex items-start gap-3 text-sm text-moca-black">
+            <input
+              type="checkbox"
+              checked={form.serp_page_prices ?? true}
+              onChange={(event) => update('serp_page_prices', event.target.checked)}
+              disabled={!canWrite}
+              className="mt-0.5 rounded border-gray-300 text-moca-red focus:ring-moca-red"
+            />
+            <span>
+              Leggi il prezzo dalla scheda del venditore
+              <span className="block text-xs text-moca-gray mt-0.5">
+                Quando Google riconosce il prodotto ma lo snippet non mostra il
+                prezzo, l'app apre la pagina del venditore e legge i dati
+                strutturati. Nessun costo aggiuntivo, qualche secondo in piu' per prodotto.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 text-sm text-moca-black">
+            <input
+              type="checkbox"
+              checked={form.ai_match_enabled ?? true}
+              onChange={(event) => update('ai_match_enabled', event.target.checked)}
+              disabled={!canWrite}
+              className="mt-0.5 rounded border-gray-300 text-moca-red focus:ring-moca-red"
+            />
+            <span>
+              Verifica AI dei risultati incerti
+              <span className="block text-xs text-moca-gray mt-0.5">
+                I risultati con somiglianza fra il 40% e l'80% vengono sottoposti a
+                Claude insieme ai dati del prodotto: conferma quelli che sono lo
+                stesso articolo e scarta accessori e varianti.
+                {hasAi
+                  ? ' Chiave Anthropic configurata sull\'Hub.'
+                  : ' Serve ANTHROPIC_API_KEY fra le configurazioni del cliente su Moca Hub: senza, questo passaggio viene saltato.'}
+              </span>
+            </span>
+          </label>
 
           <label className="flex items-start gap-3 text-sm text-moca-black">
             <input

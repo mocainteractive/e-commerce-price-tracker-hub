@@ -3,14 +3,15 @@
  *
  * Mostra esattamente cosa succede: la query inviata a Google, i risultati
  * tornati, e per ciascuno il punteggio di somiglianza e il motivo per cui e'
- * stato tenuto o scartato.
+ * stato tenuto o scartato, il prezzo letto dalla scheda del venditore e il
+ * verdetto dell'AI quando e' intervenuta.
  *
  * Esiste perche' "la scansione non ha trovato nulla" non e' una diagnosi.
  * Con un motore di matching serve vedere i numeri: senza, si tira a indovinare
  * quale delle dieci cause possibili sia quella vera.
  */
 import { useState } from 'react';
-import { CheckCircle2, Search, XCircle } from 'lucide-react';
+import { CheckCircle2, Search, Sparkles, XCircle } from 'lucide-react';
 import { apiPost, ApiError } from '../lib/api';
 import { useMoca } from '../lib/MocaProvider';
 import { Badge, Card, ErrorBanner, Spinner } from './ui';
@@ -27,6 +28,8 @@ interface Candidato {
   metodo: string | null;
   accettato: boolean;
   motivo: string;
+  prezzoDaPagina?: boolean;
+  ai?: { stesso: boolean; confidenza: number; motivo: string };
 }
 
 interface QueryDiagnostica {
@@ -36,6 +39,9 @@ interface QueryDiagnostica {
   conPrezzo: number;
   candidati: Candidato[];
   errore?: string;
+  prezziDaPagina: number;
+  aiVerificati: number;
+  note: string[];
 }
 
 interface Risposta {
@@ -49,8 +55,16 @@ interface Risposta {
     offerteSalvate: number;
     dominiEsclusi: string[];
   };
-  impostazioni: { paese: number; lingua: string; sogliaMatch: number };
+  impostazioni: {
+    paese: number;
+    lingua: string;
+    sogliaMatch: number;
+    fasciaAi: [number, number];
+    aiAttiva: boolean;
+    prezziDaPagina: boolean;
+  };
   salvato: boolean;
+  elapsedMs: number;
 }
 
 const METODI: Record<string, string> = {
@@ -58,6 +72,7 @@ const METODI: Record<string, string> = {
   mpn: 'Codice produttore',
   google_shopping: 'Google Shopping',
   serp: 'Somiglianza',
+  ai: 'AI',
   manual: 'Manuale',
 };
 
@@ -116,7 +131,9 @@ export function DiagnosticaRicerca({ productId, onSaved }: { productId: string; 
         <p className="text-sm text-moca-gray">
           Esegue la ricerca su questo prodotto senza salvare nulla, e mostra cosa
           torna da Google: la query inviata, i risultati, e per ognuno il punteggio
-          di somiglianza con il motivo per cui viene tenuto o scartato.
+          di somiglianza con il motivo per cui viene tenuto o scartato. Quando lo
+          snippet non mostra il prezzo lo legge dalla scheda del venditore, e sui
+          casi incerti chiede un parere all'AI.
         </p>
       )}
 
@@ -129,6 +146,11 @@ export function DiagnosticaRicerca({ productId, onSaved }: { productId: string; 
               {dati.diagnostica.gtin ? `EAN ${dati.diagnostica.gtin}` : 'EAN assente'}
             </span>
             <span>Soglia di accettazione: {(dati.impostazioni.sogliaMatch * 100).toFixed(0)}%</span>
+            <span>
+              Verifica AI: {dati.impostazioni.aiAttiva ? 'attiva' : 'non attiva'} (fascia{' '}
+              {(dati.impostazioni.fasciaAi[0] * 100).toFixed(0)}-{(dati.impostazioni.fasciaAi[1] * 100).toFixed(0)}%)
+            </span>
+            <span>Durata: {(dati.elapsedMs / 1000).toFixed(1)} s</span>
             {dati.salvato && (
               <span className="text-success">
                 {dati.diagnostica.offerteSalvate} offerte salvate
@@ -148,10 +170,22 @@ export function DiagnosticaRicerca({ productId, onSaved }: { productId: string; 
                 <div className="text-xs text-moca-gray tabular-nums shrink-0">
                   {q.risultatiTotali} risultati · {q.conPrezzo} con prezzo ·{' '}
                   {q.candidati.filter((c) => c.accettato).length} accettati
+                  {q.prezziDaPagina > 0 && ` · ${q.prezziDaPagina} prezzi dalla scheda`}
+                  {q.aiVerificati > 0 && ` · ${q.aiVerificati} verificati dall'AI`}
                 </div>
               </div>
 
               {q.errore && <ErrorBanner message={q.errore} />}
+
+              {q.note.length > 0 && (
+                <ul className="mb-3 space-y-1">
+                  {q.note.map((nota, i) => (
+                    <li key={i} className="text-xs text-moca-gray">
+                      {nota}
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               {q.candidati.length > 0 && (
                 <ul className="divide-y divide-gray-100">
@@ -172,12 +206,23 @@ export function DiagnosticaRicerca({ productId, onSaved }: { productId: string; 
                             <span className="text-xs text-moca-gray">posizione {c.posizione}</span>
                           )}
                           {c.prezzo !== null && (
-                            <Badge tone="info">{formatPrice(c.prezzo, c.valuta ?? 'EUR')}</Badge>
+                            <Badge tone="info">
+                              {formatPrice(c.prezzo, c.valuta ?? 'EUR')}
+                              {c.prezzoDaPagina ? ' · dalla scheda' : ''}
+                            </Badge>
                           )}
                           {c.punteggio !== null && (
                             <Badge tone={c.accettato ? 'positivo' : 'neutro'}>
                               {(c.punteggio * 100).toFixed(0)}%
                               {c.metodo ? ` · ${METODI[c.metodo] ?? c.metodo}` : ''}
+                            </Badge>
+                          )}
+                          {c.ai && (
+                            <Badge tone={c.ai.stesso ? 'positivo' : 'attenzione'}>
+                              <span className="inline-flex items-center gap-1">
+                                <Sparkles size={11} />
+                                AI {c.ai.stesso ? 'stesso prodotto' : 'prodotto diverso'} {(c.ai.confidenza * 100).toFixed(0)}%
+                              </span>
                             </Badge>
                           )}
                         </div>

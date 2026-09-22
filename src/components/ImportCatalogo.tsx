@@ -3,12 +3,14 @@
  *
  * Strategia, in ordine di preferenza:
  *   1. **File locale** (CSV o XML): letto e interpretato nel browser. Nessuna
- *      rete, nessun limite di tempo, funziona anche con feed che il server non
- *      riesce a scaricare.
+ *      rete, nessun limite di tempo ne' di righe, funziona anche con feed che
+ *      il server non riesce a scaricare (24 MB generati in 90 secondi si
+ *      leggono qui in due).
  *   2. **URL scaricata dal browser**: se la sorgente espone CORS, il download
  *      avviene qui, senza passare dalle funzioni e senza limiti di durata.
  *   3. **URL via proxy** (`/api/fetch-source`): solo se il browser non puo'
- *      per via del CORS. E' l'unico passaggio vincolato ai ~10 secondi.
+ *      per via del CORS. E' l'unico passaggio vincolato ai ~10 secondi, e ha
+ *      un tetto di righe: quando scatta viene detto, mai in silenzio.
  *
  * Il salvataggio e' sempre a lotti da 200 righe verso `/api/catalog-save`,
  * cosi' nessuna singola chiamata rischia il timeout, qualunque sia la
@@ -33,10 +35,13 @@ import { filtraUrlProdotto } from '../../netlify/functions/utils/sitemap-filter'
 const RIGHE_PER_LOTTO = 200;
 /** Allineato a MAX_URLS_PER_CALL della funzione. */
 const URL_PER_CHIAMATA = 5;
-/** Tetto di sicurezza sullo scraping da sitemap: e' il percorso piu' lento. */
-const MAX_PAGINE_SITEMAP = 500;
+/** Pagine lette per ogni giro di import da sitemap: e' il percorso piu' lento. */
+const PAGINE_PER_GIRO = 500;
+/** URL raccolte dagli indici di sitemap: leggerle e' economico, filtrarle serve. */
+const MAX_URL_RACCOLTE = 50000;
 
 type Sorgente = 'feed' | 'sitemap' | 'file';
+type Contesto = ReturnType<typeof useMoca>['requestContext'];
 
 export function ImportCatalogo({ onDone }: { onDone: () => void }) {
   const { requestContext } = useMoca();
@@ -48,20 +53,46 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
   const [sostituisci, setSostituisci] = useState(false);
   const [includi, setIncludi] = useState('');
   const [escludi, setEscludi] = useState('');
+  /** Da quale pagina riprendere l'import da sitemap: si avanza a ogni giro. */
+  const [ripresa, setRipresa] = useState<{ url: string; offset: number; totale: number } | null>(null);
 
   const regoleInclude = includi.split(',').map((p) => p.trim()).filter(Boolean);
   const regoleEscludi = escludi.split(',').map((p) => p.trim()).filter(Boolean);
 
+  const offsetSitemap = ripresa && ripresa.url === url.trim() ? ripresa.offset : 0;
+
   const avvia = () =>
     run(async (ctx) => {
-      const iniziatoAlle = new Date().toISOString();
+      // L'istante di inizio lo fornisce il server: `updated_at` lo scrive il
+      // database, e l'orologio del browser potrebbe essere avanti.
+      let iniziatoAlle: string | null = null;
+      if (sostituisci) {
+        const inizio = await apiPost<{ startedAt: string }>(requestContext, 'catalog-finalize', { begin: true });
+        iniziatoAlle = inizio.startedAt;
+      }
 
-      const righe =
-        sorgente === 'file'
-          ? await daFile(file, ctx)
-          : sorgente === 'sitemap'
-            ? await daSitemap(url, requestContext, ctx, regoleInclude, regoleEscludi)
-            : await daFeed(url, requestContext, ctx);
+      let righe: CatalogRow[];
+      let seguito: string | null = null;
+
+      if (sorgente === 'file') {
+        righe = await daFile(file, ctx);
+      } else if (sorgente === 'sitemap') {
+        const esito = await daSitemap(url.trim(), requestContext, ctx, regoleInclude, regoleEscludi, offsetSitemap);
+        righe = esito.righe;
+        if (esito.prossimoOffset < esito.totale) {
+          setRipresa({ url: url.trim(), offset: esito.prossimoOffset, totale: esito.totale });
+          seguito = `Lette ${esito.prossimoOffset} pagine su ${esito.totale}: premi di nuovo Avvia import per proseguire con le successive.`;
+        } else {
+          setRipresa(null);
+        }
+        if (sostituisci && esito.prossimoOffset < esito.totale) {
+          throw new Error(
+            'Con "Disattiva i prodotti non presenti" l\'import da sitemap deve leggere tutte le pagine in un giro: togli la spunta oppure restringi la sitemap con le regole.',
+          );
+        }
+      } else {
+        righe = await daFeed(url.trim(), requestContext, ctx, sostituisci);
+      }
 
       if (righe.length === 0) {
         throw new Error('Nessun prodotto valido trovato nella sorgente indicata');
@@ -70,7 +101,7 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
       const esito = await salva(righe, requestContext, ctx);
 
       let disattivati = 0;
-      if (sostituisci) {
+      if (sostituisci && iniziatoAlle) {
         disattivati = await finalizza(iniziatoAlle, requestContext, ctx);
       }
 
@@ -81,6 +112,7 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
         `${esito.conGtin} con codice EAN`,
         esito.senzaPrezzo > 0 ? `${esito.senzaPrezzo} senza prezzo` : null,
         disattivati > 0 ? `${disattivati} disattivati perche' non piu' nel catalogo` : null,
+        seguito,
       ]
         .filter(Boolean)
         .join(' · ');
@@ -133,7 +165,8 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
             <p className="mt-1 text-xs text-moca-gray">
               CSV (colonne: titolo, sku, ean, mpn, marca, prezzo, url, immagine) oppure
               feed XML salvato dal browser. Il file viene letto qui, senza passare dal
-              server: e' la via piu' affidabile con i feed generati al volo.
+              server e senza limiti di righe: e' la via giusta per i feed grandi o
+              generati al volo.
             </p>
           </div>
         ) : (
@@ -156,9 +189,17 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
             />
             <p className="mt-1 text-xs text-moca-gray">
               {sorgente === 'feed'
-                ? 'Il browser prova a scaricarlo direttamente; se la sorgente non lo consente, passa dal server.'
-                : `Le pagine prodotto vengono lette a gruppi di ${URL_PER_CHIAMATA} per estrarne i dati strutturati. E' il metodo piu' lento: al massimo ${MAX_PAGINE_SITEMAP} pagine per volta.`}
+                ? 'Il browser prova a scaricarlo direttamente; se la sorgente non lo consente, passa dal server, che ha 10 secondi e un tetto di righe. Per i feed grandi usa il file.'
+                : `Le pagine prodotto vengono lette a gruppi di ${URL_PER_CHIAMATA} per estrarne i dati strutturati. E' il metodo piu' lento: ${PAGINE_PER_GIRO} pagine per giro, riprendendo dalle successive al giro dopo.`}
             </p>
+            {sorgente === 'sitemap' && offsetSitemap > 0 && ripresa && (
+              <p className="mt-1 text-xs text-moca-black">
+                Prossimo giro: dalla pagina {offsetSitemap + 1} di {ripresa.totale}.{' '}
+                <button type="button" className="text-moca-red hover:underline" onClick={() => setRipresa(null)}>
+                  Ricomincia dall'inizio
+                </button>
+              </p>
+            )}
           </div>
         )}
 
@@ -220,7 +261,7 @@ export function ImportCatalogo({ onDone }: { onDone: () => void }) {
         <div className="flex items-center gap-3">
           <button onClick={avvia} disabled={state.running || !pronto} className="moca-btn-primary">
             {state.running ? <Download size={16} className="animate-pulse" /> : <Upload size={16} />}
-            {state.running ? 'Import in corso…' : 'Avvia import'}
+            {state.running ? 'Import in corso…' : offsetSitemap > 0 ? 'Prosegui import' : 'Avvia import'}
           </button>
         </div>
       </div>
@@ -240,16 +281,18 @@ async function daFile(file: File | null, ctx: JobContext): Promise<CatalogRow[]>
   ctx.nota(`File letto: ${(file.size / 1024).toFixed(0)} KB`);
 
   const sembraXml = testo.trimStart().startsWith('<');
+  const avvio = Date.now();
   const righe = sembraXml ? parseFeedXml(testo) : importFromCsv(testo);
 
-  ctx.nota(`${righe.length} prodotti interpretati dal ${sembraXml ? 'feed XML' : 'CSV'}`);
+  ctx.nota(`${righe.length} prodotti interpretati dal ${sembraXml ? 'feed XML' : 'CSV'} in ${Date.now() - avvio} ms`);
   return righe;
 }
 
 async function daFeed(
   url: string,
-  requestContext: ReturnType<typeof useMoca>['requestContext'],
+  requestContext: Contesto,
   ctx: JobContext,
+  sostituisci: boolean,
 ): Promise<CatalogRow[]> {
   ctx.fase('Scaricamento del feed…');
 
@@ -264,22 +307,30 @@ async function daFeed(
 
   // 2. Fallback sul proxy: e' l'unico passaggio con il limite dei 10 secondi.
   ctx.fase('Scaricamento tramite il server…');
-  const risposta = await apiPost<{ rows: CatalogRow[]; elapsedMs: number }>(
+  const risposta = await apiPost<{ rows: CatalogRow[]; total: number; truncated: boolean; elapsedMs: number }>(
     requestContext,
     'fetch-source',
     { url, kind: 'feed' },
   );
   ctx.nota(`Server: ${risposta.rows.length} prodotti in ${risposta.elapsedMs} ms`);
+
+  if (risposta.truncated) {
+    const avviso = `Il feed contiene ${risposta.total} prodotti ma il server puo' trasferirne al massimo ${risposta.rows.length}. Per il catalogo completo salva il feed in un file e caricalo con "File CSV o XML".`;
+    // Con l'import sostitutivo un catalogo parziale disattiverebbe tutto il resto.
+    if (sostituisci) throw new Error(avviso);
+    ctx.nota(`ATTENZIONE: ${avviso}`);
+  }
   return risposta.rows;
 }
 
 async function daSitemap(
   url: string,
-  requestContext: ReturnType<typeof useMoca>['requestContext'],
+  requestContext: Contesto,
   ctx: JobContext,
   regoleInclude: string[],
   regoleEscludi: string[],
-): Promise<CatalogRow[]> {
+  offset: number,
+): Promise<{ righe: CatalogRow[]; prossimoOffset: number; totale: number }> {
   ctx.fase('Lettura della sitemap…');
 
   const urls = await raccogliUrlSitemap(url, requestContext, ctx);
@@ -301,9 +352,11 @@ async function daSitemap(
     );
   }
 
-  const daLeggere = filtrate.urls.slice(0, MAX_PAGINE_SITEMAP);
-  if (filtrate.urls.length > daLeggere.length) {
-    ctx.nota(`Limite di ${MAX_PAGINE_SITEMAP} pagine per import: le restanti al giro successivo`);
+  const inizio = Math.min(offset, filtrate.urls.length);
+  const daLeggere = filtrate.urls.slice(inizio, inizio + PAGINE_PER_GIRO);
+  if (inizio > 0) ctx.nota(`Riprendo dalla pagina ${inizio + 1}`);
+  if (inizio + daLeggere.length < filtrate.urls.length) {
+    ctx.nota(`${PAGINE_PER_GIRO} pagine per giro: le restanti ${filtrate.urls.length - inizio - daLeggere.length} al giro successivo`);
   }
 
   const righe: CatalogRow[] = [];
@@ -328,13 +381,13 @@ async function daSitemap(
   }
 
   ctx.nota(`${righe.length} pagine prodotto valide su ${daLeggere.length} lette`);
-  return righe;
+  return { righe, prossimoOffset: inizio + daLeggere.length, totale: filtrate.urls.length };
 }
 
 /** Segue gli indici di sitemap, con un tetto di profondita'. */
 async function raccogliUrlSitemap(
   url: string,
-  requestContext: ReturnType<typeof useMoca>['requestContext'],
+  requestContext: Contesto,
   ctx: JobContext,
   profondita = 0,
 ): Promise<string[]> {
@@ -364,7 +417,7 @@ async function raccogliUrlSitemap(
 
   for (const sotto of nested) {
     verificaAnnullamento(ctx);
-    if (raccolte.length >= MAX_PAGINE_SITEMAP) break;
+    if (raccolte.length >= MAX_URL_RACCOLTE) break;
     raccolte.push(...(await raccogliUrlSitemap(sotto, requestContext, ctx, profondita + 1)));
   }
 
@@ -408,7 +461,7 @@ interface EsitoSalvataggio {
 
 async function salva(
   righe: CatalogRow[],
-  requestContext: ReturnType<typeof useMoca>['requestContext'],
+  requestContext: Contesto,
   ctx: JobContext,
 ): Promise<EsitoSalvataggio> {
   const lotti = aLotti(righe, RIGHE_PER_LOTTO);
@@ -444,14 +497,14 @@ async function salva(
 
 async function finalizza(
   iniziatoAlle: string,
-  requestContext: ReturnType<typeof useMoca>['requestContext'],
+  requestContext: Contesto,
   ctx: JobContext,
 ): Promise<number> {
   ctx.fase("Disattivazione dei prodotti non piu' presenti…");
 
   let totale = 0;
   // La funzione lavora a blocchi e dice se ne restano: si ripete finche' no.
-  for (let giro = 0; giro < 50; giro += 1) {
+  for (let giro = 0; giro < 200; giro += 1) {
     verificaAnnullamento(ctx);
 
     const risposta = await apiPost<{ deactivated: number; remaining: number }>(
